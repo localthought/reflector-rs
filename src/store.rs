@@ -30,7 +30,9 @@ use atomic_lib::values::SubResource;
 use atomic_lib::{urls, Resource, Storelike, Subject, Value};
 
 use crate::ontology::{decode_segment, encode_segment, SubjectMapper};
-use syncables::{Ontology, OntologyTerm, Record, Storage, StorageError, TermKind};
+use syncables::{
+    ontology_shortname, Ontology, OntologyTerm, Record, Storage, StorageError, TermKind,
+};
 
 /// Sets a property on a Resource, surfacing the failure rather than dropping
 /// it: `set_unsafe` writes through to the resource's CRDT document, so it can
@@ -118,13 +120,18 @@ impl<S: Storelike> AtomicStorage<S> {
     /// subject under the ontology's own path, so an incomplete ontology
     /// costs correct typing but never loses data.
     fn property_for(&self, index: &TermIndex, field: &str) -> (String, Option<String>) {
-        if let Some(term) = index.properties.get(field) {
+        let shortname = ontology_shortname(field);
+        if let Some(term) = index.properties.get(&shortname) {
             return term.clone();
         }
         let path = if index.ontology_path.is_empty() {
-            format!("property/{}", encode_segment(field))
+            format!("property/{}", encode_segment(&shortname))
         } else {
-            format!("{}/property/{}", index.ontology_path, encode_segment(field))
+            format!(
+                "{}/property/{}",
+                index.ontology_path,
+                encode_segment(&shortname)
+            )
         };
         (self.mapper.internal(&path), None)
     }
@@ -242,7 +249,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
         let subject = self.record_subject(&record.namespace, &record.resource, &record.id);
         let mut resource = Resource::new(subject);
 
-        if let Some(class) = index.classes.get(&record.resource) {
+        if let Some(class) = index.classes.get(&ontology_shortname(&record.resource)) {
             set!(
                 resource,
                 urls::IS_A.to_owned(),
@@ -261,16 +268,12 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
             set!(
                 resource,
                 property,
-                value_from_json(json, datatype.as_deref())
+                value_from_json(json, datatype.as_deref())?
             );
         }
 
-        // Required-property validation is off: the ontology is minted from an
-        // OpenAPI document at run time, so a class's `requires` list is only
-        // as complete as that document, and a partial record from the API
-        // should still be stored rather than rejected.
         self.store
-            .add_resource_opts(&resource, false, true, true)
+            .add_resource(&resource)
             .await
             .map_err(|error| StorageError::new(error.to_string()))
     }
@@ -394,13 +397,28 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
 /// JSON → Atomic Data. The ontology's datatype decides when it can (a string
 /// the document typed as a timestamp is stored as one); otherwise the JSON
 /// type does.
-fn value_from_json(json: &serde_json::Value, datatype: Option<&str>) -> Value {
-    if let (Some(datatype), Some(text)) = (datatype, json.as_str()) {
-        if let Ok(value) = Value::new(text, &match_datatype(datatype)) {
-            return value;
+fn value_from_json(
+    json: &serde_json::Value,
+    datatype: Option<&str>,
+) -> Result<Value, StorageError> {
+    if let Some(datatype) = datatype {
+        if datatype == urls::TIMESTAMP {
+            let text = json
+                .as_str()
+                .ok_or_else(|| StorageError::new("a timestamp must be a JSON string"))?;
+            let timestamp = chrono::DateTime::parse_from_rfc3339(text)
+                .map_err(|error| StorageError::new(format!("invalid RFC 3339 timestamp: {error}")))?
+                .timestamp_millis();
+            return Ok(Value::Timestamp(timestamp));
         }
+        let text = json
+            .as_str()
+            .map(str::to_owned)
+            .unwrap_or_else(|| json.to_string());
+        return Value::new(&text, &match_datatype(datatype))
+            .map_err(|error| StorageError::new(error.to_string()));
     }
-    match json {
+    Ok(match json {
         serde_json::Value::Bool(value) => Value::Boolean(*value),
         serde_json::Value::Number(number) => match number.as_i64() {
             Some(integer) => Value::Integer(integer),
@@ -412,7 +430,7 @@ fn value_from_json(json: &serde_json::Value, datatype: Option<&str>) -> Value {
         // inventing subjects for anonymous sub-objects would mint terms the
         // document never declared.
         other => Value::Json(other.clone()),
-    }
+    })
 }
 
 /// Atomic Data → JSON, the inverse of [`value_from_json`] for the variants
@@ -473,6 +491,33 @@ mod tests {
                     datatype: Some(urls::INTEGER.to_owned()),
                     requires: vec![],
                     recommends: vec![],
+                },
+                OntologyTerm {
+                    path: "github-issues/property/body".to_owned(),
+                    kind: TermKind::Property,
+                    shortname: "body".to_owned(),
+                    description: "The comment body.".to_owned(),
+                    datatype: Some(urls::STRING.to_owned()),
+                    requires: vec![],
+                    recommends: vec![],
+                },
+                OntologyTerm {
+                    path: "github-issues/property/updated-at".to_owned(),
+                    kind: TermKind::Property,
+                    shortname: "updated-at".to_owned(),
+                    description: "When the resource was updated.".to_owned(),
+                    datatype: Some(urls::TIMESTAMP.to_owned()),
+                    requires: vec![],
+                    recommends: vec![],
+                },
+                OntologyTerm {
+                    path: "github-issues/class/issuecomment".to_owned(),
+                    kind: TermKind::Class,
+                    shortname: "issuecomment".to_owned(),
+                    description: "A comment on an issue.".to_owned(),
+                    datatype: None,
+                    requires: vec!["github-issues/property/body".to_owned()],
+                    recommends: vec!["github-issues/property/updated-at".to_owned()],
                 },
             ],
         }
@@ -603,6 +648,82 @@ mod tests {
             .expect("get")
             .expect("some");
         assert_eq!(read.value["state"], serde_json::json!("open"));
+    }
+
+    #[tokio::test]
+    async fn raw_api_names_resolve_to_the_generated_ontology_terms() {
+        let storage = storage().await;
+        storage.put_ontology(&ontology()).await.expect("ontology");
+        let record = Record {
+            namespace: "localthought/test-repo-1/1".to_owned(),
+            resource: "issueComment".to_owned(),
+            id: "5449492104".to_owned(),
+            value: serde_json::json!({
+                "body": "A readable comment",
+                "updated_at": "2026-08-28T07:02:45Z",
+            })
+            .as_object()
+            .expect("object")
+            .clone(),
+        };
+        storage.put(&record).await.expect("put comment");
+
+        let stored = storage
+            .store
+            .get_resource(&Subject::from(
+                "internal:/localthought%2Ftest-repo-1%2F1/issueComment/5449492104",
+            ))
+            .await
+            .expect("comment");
+        assert!(stored
+            .get(urls::IS_A)
+            .expect("class")
+            .to_string()
+            .contains("internal:/github-issues/class/issuecomment"));
+        assert!(matches!(
+            stored
+                .get("internal:/github-issues/property/updated-at")
+                .expect("normalized timestamp property"),
+            Value::Timestamp(_)
+        ));
+        assert!(stored
+            .get("internal:/github-issues/property/updated_at")
+            .is_err());
+    }
+
+    #[tokio::test]
+    async fn rejects_a_record_missing_a_required_ontology_property() {
+        let storage = storage().await;
+        storage.put_ontology(&ontology()).await.expect("ontology");
+        let mut incomplete = record();
+        incomplete.value.remove("title");
+
+        let error = storage.put(&incomplete).await.expect_err("missing title");
+        assert!(error.to_string().contains("property/title"), "{error}");
+    }
+
+    #[tokio::test]
+    async fn rejects_a_malformed_timestamp_for_a_declared_property() {
+        let storage = storage().await;
+        storage.put_ontology(&ontology()).await.expect("ontology");
+        let record = Record {
+            namespace: "localthought/test-repo-1/1".to_owned(),
+            resource: "issueComment".to_owned(),
+            id: "5449492104".to_owned(),
+            value: serde_json::json!({
+                "body": "A readable comment",
+                "updated_at": "not-a-timestamp",
+            })
+            .as_object()
+            .expect("object")
+            .clone(),
+        };
+
+        let error = storage.put(&record).await.expect_err("malformed timestamp");
+        assert!(
+            error.to_string().contains("invalid RFC 3339 timestamp"),
+            "{error}"
+        );
     }
 
     #[tokio::test]
