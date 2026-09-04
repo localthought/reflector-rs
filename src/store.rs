@@ -52,8 +52,8 @@ struct TermIndex {
     /// Path of the ontology resource itself, used to mint a fallback term for
     /// a field the ontology did not declare.
     ontology_path: String,
-    /// Property shortname → (internal subject, datatype URL).
-    properties: HashMap<String, (String, Option<String>)>,
+    /// Property shortname → (internal subject, datatype URL, class path).
+    properties: HashMap<String, (String, Option<String>, Option<String>)>,
     /// Class shortname → internal subject.
     classes: HashMap<String, String>,
 }
@@ -119,7 +119,11 @@ impl<S: Storelike> AtomicStorage<S> {
     /// ontology declared uses that term; anything else gets a deterministic
     /// subject under the ontology's own path, so an incomplete ontology
     /// costs correct typing but never loses data.
-    fn property_for(&self, index: &TermIndex, field: &str) -> (String, Option<String>) {
+    fn property_for(
+        &self,
+        index: &TermIndex,
+        field: &str,
+    ) -> (String, Option<String>, Option<String>) {
         let shortname = ontology_shortname(field);
         if let Some(term) = index.properties.get(&shortname) {
             return term.clone();
@@ -133,11 +137,16 @@ impl<S: Storelike> AtomicStorage<S> {
                 encode_segment(&shortname)
             )
         };
-        (self.mapper.internal(&path), None)
+        (self.mapper.internal(&path), None, None)
     }
 
     /// Turns one stored resource back into the record the engine put there.
-    fn record_from_resource(&self, resource: &Resource, index: &TermIndex) -> Option<Record> {
+    fn record_from_resource(
+        &self,
+        resource: &Resource,
+        index: &TermIndex,
+        resources: &HashMap<String, Resource>,
+    ) -> Option<Record> {
         let subject = resource.get_subject().to_string();
         let path = subject.strip_prefix(crate::ontology::INTERNAL_PREFIX)?;
         let segments: Vec<&str> = path.split('/').collect();
@@ -147,7 +156,7 @@ impl<S: Storelike> AtomicStorage<S> {
         // Reverse the shortname → subject map once per resource; the ontology
         // is small (tens of terms) and this keeps the index single-purpose.
         let mut shortnames: HashMap<&str, &str> = HashMap::new();
-        for (shortname, (property_subject, _)) in &index.properties {
+        for (shortname, (property_subject, _, _)) in &index.properties {
             shortnames.insert(property_subject.as_str(), shortname.as_str());
         }
 
@@ -162,7 +171,14 @@ impl<S: Storelike> AtomicStorage<S> {
                 // so the last segment is the field name.
                 None => decode_segment(property.rsplit('/').next().unwrap_or(property)),
             };
-            value.insert(field, json_from_value(stored));
+            let follows_nested = index
+                .properties
+                .values()
+                .any(|(subject, _, class_type)| subject == property && class_type.is_some());
+            value.insert(
+                field,
+                self.json_from_value(stored, index, resources, follows_nested),
+            );
         }
 
         Some(Record {
@@ -171,6 +187,135 @@ impl<S: Storelike> AtomicStorage<S> {
             id: decode_segment(segments[2]),
             value,
         })
+    }
+
+    fn json_from_value(
+        &self,
+        value: &Value,
+        index: &TermIndex,
+        resources: &HashMap<String, Resource>,
+        follows_nested: bool,
+    ) -> serde_json::Value {
+        match value {
+            Value::AtomicUrl(subject)
+                if follows_nested && resources.contains_key(&subject.to_string()) =>
+            {
+                self.object_from_resource(&resources[&subject.to_string()], index, resources)
+            }
+            Value::ResourceArray(items) if follows_nested => serde_json::Value::Array(
+                items
+                    .iter()
+                    .map(|item| match item {
+                        SubResource::Subject(subject)
+                            if resources.contains_key(&subject.to_string()) =>
+                        {
+                            self.object_from_resource(
+                                &resources[&subject.to_string()],
+                                index,
+                                resources,
+                            )
+                        }
+                        SubResource::Subject(subject) => {
+                            serde_json::Value::String(subject.to_string())
+                        }
+                        SubResource::Nested(_) => serde_json::Value::Null,
+                    })
+                    .collect(),
+            ),
+            other => json_from_value(other),
+        }
+    }
+
+    fn object_from_resource(
+        &self,
+        resource: &Resource,
+        index: &TermIndex,
+        resources: &HashMap<String, Resource>,
+    ) -> serde_json::Value {
+        let reverse: HashMap<&str, &str> = index
+            .properties
+            .iter()
+            .map(|(shortname, (subject, _, _))| (subject.as_str(), shortname.as_str()))
+            .collect();
+        let mut object = serde_json::Map::new();
+        for (property, value) in resource.get_propvals() {
+            if property == urls::IS_A {
+                continue;
+            }
+            let field = reverse
+                .get(property.as_str())
+                .map(|name| (*name).to_owned())
+                .unwrap_or_else(|| decode_segment(property.rsplit('/').next().unwrap_or(property)));
+            let follows_nested = index
+                .properties
+                .values()
+                .any(|(subject, _, class_type)| subject == property && class_type.is_some());
+            object.insert(
+                field,
+                self.json_from_value(value, index, resources, follows_nested),
+            );
+        }
+        serde_json::Value::Object(object)
+    }
+
+    fn resources_for_object(
+        &self,
+        subject: String,
+        class: Option<&str>,
+        object: &serde_json::Map<String, serde_json::Value>,
+        index: &TermIndex,
+    ) -> Result<Vec<Resource>, StorageError> {
+        let mut resource = Resource::new(subject.clone());
+        if let Some(class) = class {
+            set!(
+                resource,
+                urls::IS_A.to_owned(),
+                Value::ResourceArray(vec![SubResource::Subject(Subject::from(
+                    self.mapper.resolve_reference(class).as_str()
+                ))])
+            );
+        }
+        let mut resources = Vec::new();
+        for (field, json) in object {
+            if json.is_null() {
+                continue;
+            }
+            let (property, datatype, class_type) = self.property_for(index, field);
+            let value = match json {
+                serde_json::Value::Object(child) => {
+                    let child_subject = format!("{subject}/{}", encode_segment(field));
+                    resources.extend(self.resources_for_object(
+                        child_subject.clone(),
+                        class_type.as_deref(),
+                        child,
+                        index,
+                    )?);
+                    Value::AtomicUrl(Subject::from(child_subject.as_str()))
+                }
+                serde_json::Value::Array(items)
+                    if items.iter().all(serde_json::Value::is_object) =>
+                {
+                    let mut references = Vec::new();
+                    for (position, item) in items.iter().enumerate() {
+                        let child_subject =
+                            format!("{subject}/{}/{position}", encode_segment(field));
+                        resources.extend(self.resources_for_object(
+                            child_subject.clone(),
+                            class_type.as_deref(),
+                            item.as_object().expect("checked object"),
+                            index,
+                        )?);
+                        references
+                            .push(SubResource::Subject(Subject::from(child_subject.as_str())));
+                    }
+                    Value::ResourceArray(references)
+                }
+                _ => value_from_json(json, datatype.as_deref())?,
+            };
+            set!(resource, property, value);
+        }
+        resources.push(resource);
+        Ok(resources)
     }
 
     /// Renders one ontology term as an Atomic Data Class or Property.
@@ -211,6 +356,15 @@ impl<S: Storelike> AtomicStorage<S> {
                 Value::AtomicUrl(Subject::from(datatype.as_str())),
             );
         }
+        if let Some(class_type) = &term.class_type {
+            set!(
+                resource,
+                urls::CLASSTYPE_PROP.to_owned(),
+                Value::AtomicUrl(Subject::from(
+                    self.mapper.resolve_reference(class_type).as_str()
+                )),
+            );
+        }
         if !term.requires.is_empty() {
             set!(
                 resource,
@@ -247,35 +401,39 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
     async fn put(&self, record: &Record) -> Result<(), StorageError> {
         let index = self.index();
         let subject = self.record_subject(&record.namespace, &record.resource, &record.id);
-        let mut resource = Resource::new(subject);
-
-        if let Some(class) = index.classes.get(&ontology_shortname(&record.resource)) {
-            set!(
-                resource,
-                urls::IS_A.to_owned(),
-                Value::ResourceArray(vec![SubResource::Subject(Subject::from(class.as_str()))]),
-            );
+        let stale_prefix = format!("{subject}/");
+        let stale_subjects: Vec<Subject> = self
+            .store
+            .all_resources(false)
+            .filter_map(|resource| {
+                let candidate = resource.get_subject().to_string();
+                candidate
+                    .starts_with(&stale_prefix)
+                    .then(|| Subject::from(candidate.as_str()))
+            })
+            .collect();
+        for stale in stale_subjects {
+            self.store
+                .remove_resource(&stale)
+                .await
+                .map_err(|error| StorageError::new(error.to_string()))?;
         }
-
-        for (field, json) in &record.value {
-            // JSON `null` means "absent" in Atomic Data — GitHub sends
-            // `body: null` for a bodyless issue, and storing a placeholder
-            // would make an empty body indistinguishable from an empty string.
-            if json.is_null() {
-                continue;
-            }
-            let (property, datatype) = self.property_for(&index, field);
-            set!(
-                resource,
-                property,
-                value_from_json(json, datatype.as_deref())?
-            );
+        let resources = self.resources_for_object(
+            subject,
+            index
+                .classes
+                .get(&ontology_shortname(&record.resource))
+                .map(String::as_str),
+            &record.value,
+            &index,
+        )?;
+        for resource in resources {
+            self.store
+                .add_resource(&resource)
+                .await
+                .map_err(|error| StorageError::new(error.to_string()))?;
         }
-
-        self.store
-            .add_resource(&resource)
-            .await
-            .map_err(|error| StorageError::new(error.to_string()))
+        Ok(())
     }
 
     async fn get(
@@ -295,17 +453,29 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
             .get_resource(&subject)
             .await
             .map_err(|error| StorageError::new(error.to_string()))?;
-        Ok(self.record_from_resource(&stored, &self.index()))
+        let resources: HashMap<String, Resource> = self
+            .store
+            .all_resources(false)
+            .map(|resource| (resource.get_subject().to_string(), resource))
+            .collect();
+        Ok(self.record_from_resource(&stored, &self.index(), &resources))
     }
 
     async fn list(&self, namespace: &str, resource: &str) -> Result<Vec<Record>, StorageError> {
         let prefix = self.record_prefix(namespace, resource);
         let index = self.index();
-        let mut records: Vec<Record> = self
+        let resources: HashMap<String, Resource> = self
             .store
             .all_resources(false)
-            .filter(|stored| stored.get_subject().to_string().starts_with(&prefix))
-            .filter_map(|stored| self.record_from_resource(&stored, &index))
+            .map(|stored| (stored.get_subject().to_string(), stored))
+            .collect();
+        let mut records: Vec<Record> = resources
+            .values()
+            .filter(|stored| {
+                let subject = stored.get_subject().to_string();
+                subject.starts_with(&prefix) && subject[prefix.len()..].split('/').count() == 1
+            })
+            .filter_map(|stored| self.record_from_resource(stored, &index, &resources))
             .collect();
         // `all_resources` iterates a hash map, so sort for a stable listing.
         records.sort_by(|a, b| a.id.cmp(&b.id));
@@ -317,10 +487,21 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
         if !self.store.has_stored_resource(&subject) {
             return Ok(());
         }
-        self.store
-            .remove_resource(&subject)
-            .await
-            .map_err(|error| StorageError::new(error.to_string()))
+        let prefix = format!("{subject}/");
+        let mut subjects = vec![subject];
+        subjects.extend(self.store.all_resources(false).filter_map(|resource| {
+            let candidate = resource.get_subject().to_string();
+            candidate
+                .starts_with(&prefix)
+                .then(|| Subject::from(candidate.as_str()))
+        }));
+        for subject in subjects {
+            self.store
+                .remove_resource(&subject)
+                .await
+                .map_err(|error| StorageError::new(error.to_string()))?;
+        }
+        Ok(())
     }
 
     async fn put_ontology(&self, ontology: &Ontology) -> Result<(), StorageError> {
@@ -343,7 +524,11 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
                 TermKind::Property => {
                     term_index.properties.insert(
                         term.shortname.clone(),
-                        (subject.clone(), term.datatype.clone()),
+                        (
+                            subject.clone(),
+                            term.datatype.clone(),
+                            term.class_type.clone(),
+                        ),
                     );
                     properties.push(SubResource::Subject(Subject::from(subject.as_str())));
                 }
@@ -425,10 +610,8 @@ fn value_from_json(
             None => Value::Float(number.as_f64().unwrap_or_default()),
         },
         serde_json::Value::String(text) => Value::String(text.clone()),
-        // Arrays and objects are kept verbatim rather than flattened into
-        // nested resources: the ontology describes the API's own shapes, and
-        // inventing subjects for anonymous sub-objects would mint terms the
-        // document never declared.
+        // Object-valued properties and arrays of objects are handled by
+        // `resources_for_object`; remaining arrays keep their primitive JSON.
         other => Value::Json(other.clone()),
     })
 }
@@ -471,6 +654,7 @@ mod tests {
                     shortname: "issue".to_owned(),
                     description: "An issue in a repository.".to_owned(),
                     datatype: None,
+                    class_type: None,
                     requires: vec!["github-issues/property/title".to_owned()],
                     recommends: vec!["github-issues/property/number".to_owned()],
                 },
@@ -480,6 +664,7 @@ mod tests {
                     shortname: "title".to_owned(),
                     description: "The issue's title.".to_owned(),
                     datatype: Some(urls::STRING.to_owned()),
+                    class_type: None,
                     requires: vec![],
                     recommends: vec![],
                 },
@@ -489,6 +674,7 @@ mod tests {
                     shortname: "number".to_owned(),
                     description: "Per-repository issue number.".to_owned(),
                     datatype: Some(urls::INTEGER.to_owned()),
+                    class_type: None,
                     requires: vec![],
                     recommends: vec![],
                 },
@@ -498,6 +684,7 @@ mod tests {
                     shortname: "body".to_owned(),
                     description: "The comment body.".to_owned(),
                     datatype: Some(urls::STRING.to_owned()),
+                    class_type: None,
                     requires: vec![],
                     recommends: vec![],
                 },
@@ -507,6 +694,7 @@ mod tests {
                     shortname: "updated-at".to_owned(),
                     description: "When the resource was updated.".to_owned(),
                     datatype: Some(urls::TIMESTAMP.to_owned()),
+                    class_type: None,
                     requires: vec![],
                     recommends: vec![],
                 },
@@ -516,8 +704,69 @@ mod tests {
                     shortname: "issuecomment".to_owned(),
                     description: "A comment on an issue.".to_owned(),
                     datatype: None,
+                    class_type: None,
                     requires: vec!["github-issues/property/body".to_owned()],
                     recommends: vec!["github-issues/property/updated-at".to_owned()],
+                },
+                OntologyTerm {
+                    path: "github-issues/class/user".to_owned(),
+                    kind: TermKind::Class,
+                    shortname: "user".to_owned(),
+                    description: "A GitHub user.".to_owned(),
+                    datatype: None,
+                    class_type: None,
+                    requires: vec![],
+                    recommends: vec!["github-issues/property/login".to_owned()],
+                },
+                OntologyTerm {
+                    path: "github-issues/class/labels".to_owned(),
+                    kind: TermKind::Class,
+                    shortname: "labels".to_owned(),
+                    description: "A GitHub label.".to_owned(),
+                    datatype: None,
+                    class_type: None,
+                    requires: vec![],
+                    recommends: vec!["github-issues/property/name".to_owned()],
+                },
+                OntologyTerm {
+                    path: "github-issues/property/user".to_owned(),
+                    kind: TermKind::Property,
+                    shortname: "user".to_owned(),
+                    description: "The author.".to_owned(),
+                    datatype: Some(urls::ATOMIC_URL.to_owned()),
+                    class_type: Some("github-issues/class/user".to_owned()),
+                    requires: vec![],
+                    recommends: vec![],
+                },
+                OntologyTerm {
+                    path: "github-issues/property/labels".to_owned(),
+                    kind: TermKind::Property,
+                    shortname: "labels".to_owned(),
+                    description: "Issue labels.".to_owned(),
+                    datatype: Some(urls::RESOURCE_ARRAY.to_owned()),
+                    class_type: Some("github-issues/class/labels".to_owned()),
+                    requires: vec![],
+                    recommends: vec![],
+                },
+                OntologyTerm {
+                    path: "github-issues/property/login".to_owned(),
+                    kind: TermKind::Property,
+                    shortname: "login".to_owned(),
+                    description: "The username.".to_owned(),
+                    datatype: Some(urls::STRING.to_owned()),
+                    class_type: None,
+                    requires: vec![],
+                    recommends: vec![],
+                },
+                OntologyTerm {
+                    path: "github-issues/property/name".to_owned(),
+                    kind: TermKind::Property,
+                    shortname: "name".to_owned(),
+                    description: "The label name.".to_owned(),
+                    datatype: Some(urls::STRING.to_owned()),
+                    class_type: None,
+                    requires: vec![],
+                    recommends: vec![],
                 },
             ],
         }
@@ -648,6 +897,71 @@ mod tests {
             .expect("get")
             .expect("some");
         assert_eq!(read.value["state"], serde_json::json!("open"));
+    }
+
+    #[tokio::test]
+    async fn nested_objects_and_array_items_are_separate_typed_resources() {
+        let storage = storage().await;
+        storage.put_ontology(&ontology()).await.expect("ontology");
+        let mut record = record();
+        record
+            .value
+            .insert("user".to_owned(), serde_json::json!({ "login": "octocat" }));
+        record.value.insert(
+            "labels".to_owned(),
+            serde_json::json!([{ "name": "bug" }, { "name": "help wanted" }]),
+        );
+        storage.put(&record).await.expect("put");
+
+        let root = "internal:/localthought%2Ftest-repo-1/issue/1";
+        let stored = storage
+            .store
+            .get_resource(&Subject::from(format!("{root}/user").as_str()))
+            .await
+            .expect("user Thing");
+        assert!(stored
+            .get(urls::IS_A)
+            .unwrap()
+            .to_string()
+            .contains("internal:/github-issues/class/user"));
+        assert_eq!(
+            stored
+                .get("internal:/github-issues/property/login")
+                .unwrap()
+                .to_string(),
+            "octocat"
+        );
+        assert!(storage
+            .store
+            .has_stored_resource(&Subject::from(format!("{root}/labels/0").as_str())));
+        assert!(storage
+            .store
+            .has_stored_resource(&Subject::from(format!("{root}/labels/1").as_str())));
+
+        let read = storage
+            .get("localthought/test-repo-1", "issue", "1")
+            .await
+            .expect("get")
+            .expect("record");
+        assert_eq!(
+            read.value["user"],
+            serde_json::json!({ "login": "octocat" })
+        );
+        assert_eq!(
+            read.value["labels"],
+            serde_json::json!([{ "name": "bug" }, { "name": "help wanted" }])
+        );
+
+        storage
+            .delete("localthought/test-repo-1", "issue", "1")
+            .await
+            .expect("delete");
+        assert!(!storage
+            .store
+            .has_stored_resource(&Subject::from(format!("{root}/user").as_str())));
+        assert!(!storage
+            .store
+            .has_stored_resource(&Subject::from(format!("{root}/labels/0").as_str())));
     }
 
     #[tokio::test]

@@ -47,6 +47,12 @@ components:
         updated_at:
           type: string
           format: date-time
+        user:
+          $ref: '#/components/schemas/user'
+        labels:
+          type: array
+          items:
+            $ref: '#/components/schemas/label'
     issue-comment:
       type: object
       description: A comment on an issue.
@@ -60,6 +66,37 @@ components:
         updated_at:
           type: string
           format: date-time
+        user:
+          $ref: '#/components/schemas/user'
+    user:
+      type: object
+      description: The GitHub user that authored an issue or comment.
+      properties:
+        id:
+          type: integer
+          format: int64
+        login:
+          type: string
+        avatar_url:
+          type: string
+          format: uri
+        html_url:
+          type: string
+          format: uri
+    label:
+      type: object
+      description: A label attached to an issue.
+      properties:
+        id:
+          type: integer
+          format: int64
+        name:
+          type: string
+        color:
+          type: string
+        description:
+          type: string
+          nullable: true
 paths:
   /repos/{owner}/{repo}/issues:
     get:

@@ -1832,7 +1832,7 @@ dependencies = [
  "once_cell",
  "socket2",
  "tracing",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2128,7 +2128,7 @@ dependencies = [
  "security-framework",
  "security-framework-sys",
  "webpki-root-certs",
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
@@ -2487,7 +2487,7 @@ dependencies = [
 [[package]]
 name = "syncables"
 version = "0.1.0"
-source = "git+https://github.com/localthought/syncables-rs?rev=e9184f1588168c54b527a8634f5804c5034aac16#e9184f1588168c54b527a8634f5804c5034aac16"
+source = "git+https://github.com/localthought/syncables-rs?rev=2197caeb0501465f8239cc3715e78338469cb5ee#2197caeb0501465f8239cc3715e78338469cb5ee"
 dependencies = [
  "async-trait",
  "httpdate",
@@ -2986,7 +2986,7 @@ version = "0.1.11"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
 dependencies = [
- "windows-sys 0.61.2",
+ "windows-sys 0.52.0",
 ]
 
 [[package]]
