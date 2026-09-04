@@ -20,7 +20,7 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{anyhow, Context, Result};
 
-use crate::syncables::Credentials;
+use syncables::Credentials;
 
 /// The variable naming each setting, kept in one place so the README, the
 /// `.env.example` and the error messages cannot drift apart.

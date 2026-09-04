@@ -14,14 +14,14 @@ repository = "https://github.com/localthought/reflector-rs"
 # which the published 0.40 does not have yet.
 atomic_lib = { git = "https://github.com/ontola/atomic-server", rev = "fc045025536c1694b0c0d63024cb5ebe2db3d5c0" }
 
-# `syncables-rs` is the sync engine this binary is a host for. The crate does
-# not exist yet — the API reflector-rs needs is specified in `src/syncables.rs`
-# and tracked as issues on localthought/syncables-rs (see that module's docs).
-# Once it lands, drop the local module and switch this on:
-# syncables = { package = "syncables-rs", git = "https://github.com/localthought/syncables-rs" }
+# `syncables-rs` is the sync engine this binary is a host for. Not published
+# to crates.io yet, so it's pinned to a revision by git instead.
+syncables = { git = "https://github.com/localthought/syncables-rs", rev = "4768d12194921775b3d11fa2a79488309e614921" }
 
 anyhow = "1"
 async-trait = "0.1"
+indexmap = "2"
+reqwest = "0.13"
 serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
