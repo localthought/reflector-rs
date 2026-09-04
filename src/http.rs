@@ -12,6 +12,9 @@ use indexmap::IndexMap;
 use syncables::client::client::{Fetch, HttpRequest, HttpResponse};
 use syncables::{Error, Result};
 
+/// Identifies reflector to API hosts which reject requests without a user agent.
+const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+
 /// Sends requests with a shared [`reqwest::Client`].
 #[derive(Clone, Debug, Default)]
 pub struct ReqwestFetch {
@@ -32,7 +35,12 @@ impl Fetch for ReqwestFetch {
             .parse::<reqwest::Method>()
             .map_err(|error| Error::Http(error.to_string()))?;
 
-        let mut builder = self.client.request(method, &request.url);
+        // GitHub's REST API rejects requests without a User-Agent header. Set a
+        // host-level default, then allow the declarative request to override it.
+        let mut builder = self
+            .client
+            .request(method, &request.url)
+            .header(reqwest::header::USER_AGENT, USER_AGENT);
         for (name, value) in &request.headers {
             builder = builder.header(name, value);
         }
