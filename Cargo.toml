@@ -16,10 +16,11 @@ atomic_lib = { git = "https://github.com/ontola/atomic-server", rev = "fc0450255
 
 # `syncables-rs` is the sync engine this binary is a host for. Not published
 # to crates.io yet, so it's pinned to a revision by git instead.
-syncables = { git = "https://github.com/localthought/syncables-rs", rev = "1d3ff8ce61cf75e3f47e2e04123f4f2513d6771d" }
+syncables = { git = "https://github.com/localthought/syncables-rs", rev = "e9184f1588168c54b527a8634f5804c5034aac16" }
 
 anyhow = "1"
 async-trait = "0.1"
+chrono = "0.4"
 indexmap = "2"
 reqwest = "0.13"
 serde_json = "1"
