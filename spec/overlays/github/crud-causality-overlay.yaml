@@ -1,0 +1,138 @@
+overlay: 1.0.0
+info:
+  title: GitHub Issues API CRUD Causality
+  version: 1.0.0
+# Declares the CRUD-causality resources a local-first client needs to sync
+# GitHub issues and their comments: which collections exist, how each item is
+# addressed, and what each write does. Mirrors the shape of the Google Calendar
+# crud-causality overlay in this repo. Two GitHub-specific points worth noting:
+#
+#   * An issue is addressed in URLs by its per-repository `number`, NOT by the
+#     global `id` the payload also carries — so the identity binding maps
+#     `issue_number` to the `number` field.
+#   * `owner`/`repo` are context path variables with no collection to enumerate
+#     them from (there is no "list my repositories" step in this flow), so a
+#     client supplies them from configuration rather than discovering them.
+actions:
+  - target: $.components
+    update:
+      crudResources:
+        issue:
+          schema:
+            $ref: '#/components/schemas/issue'
+          description: >
+            An issue in a repository. Addressed by its per-repository
+            `number` (the global `id` in the payload is not the URL identity).
+            The `owner`/`repo` context is supplied by configuration.
+          identity:
+            urlTemplate: /repos/{owner}/{repo}/issues/{issue_number}
+            bindings:
+              issue_number:
+                field: number
+          collections:
+            issues:
+              urlTemplate: /repos/{owner}/{repo}/issues
+              # GitHub's issues list returns only open issues by default; include
+              # closed ones so a close/reopen can be reflected and a closed copy
+              # stays visible to duplicate detection.
+              x-list-query:
+                state: all
+        issueComment:
+          schema:
+            $ref: '#/components/schemas/issue-comment'
+          description: >
+            A comment on an issue. Listed and created under the parent issue
+            (`.../issues/{issue_number}/comments`), but GitHub addresses a
+            single comment at the non-nested
+            `/repos/{owner}/{repo}/issues/comments/{comment_id}`.
+          identity:
+            urlTemplate: /repos/{owner}/{repo}/issues/comments/{comment_id}
+            bindings:
+              comment_id:
+                field: id
+          collections:
+            issueComments:
+              urlTemplate: /repos/{owner}/{repo}/issues/{issue_number}/comments
+
+  # --- Issues -------------------------------------------------------------
+  - target: $.paths['/repos/{owner}/{repo}/issues'].post
+    update:
+      x-crud:
+        action: create
+        resource: issue
+        url:
+          source: template
+        addedFields:
+          number:
+            schema: { type: integer }
+            source: server
+            description: >
+              Per-repository issue number assigned by the server. The client
+              does not supply it; it is read back from the create response and
+              is the resource's addressable identity.
+        memberOf: [issues]
+  - target: $.paths['/repos/{owner}/{repo}/issues'].get
+    update:
+      x-crud:
+        action: list
+        resource: issue
+        collection: issues
+  - target: $.paths['/repos/{owner}/{repo}/issues/{issue_number}'].get
+    update:
+      x-crud:
+        action: read
+        resource: issue
+  - target: $.paths['/repos/{owner}/{repo}/issues/{issue_number}'].patch
+    update:
+      x-crud:
+        action: update
+        mode: patch
+        patchFormat: merge
+        resource: issue
+        description: >
+          Partial update: only the fields present in the request body are
+          modified (e.g. `state`/`state_reason` to close or reopen). GitHub
+          exposes no PUT for issues — updates must be sent as PATCH.
+
+  # --- Issue comments -----------------------------------------------------
+  - target: $.paths['/repos/{owner}/{repo}/issues/{issue_number}/comments'].post
+    update:
+      x-crud:
+        action: create
+        resource: issueComment
+        url:
+          source: template
+        addedFields:
+          id:
+            schema: { type: integer }
+            source: server
+            description: >
+              Server-assigned comment id, read back from the create response.
+        memberOf: [issueComments]
+  - target: $.paths['/repos/{owner}/{repo}/issues/{issue_number}/comments'].get
+    update:
+      x-crud:
+        action: list
+        resource: issueComment
+        collection: issueComments
+  - target: $.paths['/repos/{owner}/{repo}/issues/comments/{comment_id}'].get
+    update:
+      x-crud:
+        action: read
+        resource: issueComment
+  - target: $.paths['/repos/{owner}/{repo}/issues/comments/{comment_id}'].patch
+    update:
+      x-crud:
+        action: update
+        mode: patch
+        patchFormat: merge
+        resource: issueComment
+        description: >
+          Partial update of a comment's body. Sent as PATCH; GitHub exposes
+          no PUT for issue comments.
+  - target: $.paths['/repos/{owner}/{repo}/issues/comments/{comment_id}'].delete
+    update:
+      x-crud:
+        action: delete
+        resource: issueComment
+        removesFrom: "*"

@@ -1,0 +1,34 @@
+overlay: 1.0.0
+info:
+  title: GitHub API Pagination Schemes
+  version: 1.0.0
+# GitHub paginates list endpoints with the RFC 8288 `Link` response header
+# (rel="next"), which syncables walks as a `nextLink` scheme. syncables'
+# auto-detection only inspects request query/body params (not headers), so the
+# scheme is applied explicitly to each list operation via `x-pagination`, the
+# same way the Google Calendar pagination overlay applies its schemes.
+actions:
+  - target: $.components
+    update:
+      paginationSchemes:
+        nextLink:
+          type: nextLink
+          request:
+            queryParameters:
+              per_page:
+                role: pageSize
+                description: Results per page (max 100).
+          response:
+            headers:
+              Link:
+                role: nextLink
+                description: RFC 8288 Link header; the rel="next" URL is followed.
+
+  - target: $.paths['/repos/{owner}/{repo}/issues'].get
+    update:
+      x-pagination:
+        - scheme: nextLink
+  - target: $.paths['/repos/{owner}/{repo}/issues/{issue_number}/comments'].get
+    update:
+      x-pagination:
+        - scheme: nextLink
