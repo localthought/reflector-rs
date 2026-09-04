@@ -107,7 +107,31 @@ async fn export(store: &Arc<Store>, config: &Config) -> Result<()> {
         .export(false)
         .map_err(|error| anyhow::anyhow!("{error}"))
         .context("exporting the store")?;
-    std::fs::write(&path, exported).with_context(|| format!("writing {}", path.display()))?;
+    let formatted = pretty_json_ad(&exported)?;
+    std::fs::write(&path, formatted).with_context(|| format!("writing {}", path.display()))?;
     info!(path = %path.display(), "exported the store");
     Ok(())
+}
+
+/// Formats the valid JSON-AD export for people inspecting the generated file.
+fn pretty_json_ad(exported: &str) -> Result<String> {
+    let value: serde_json::Value =
+        serde_json::from_str(exported).context("parsing exported JSON-AD")?;
+    serde_json::to_string_pretty(&value).context("formatting exported JSON-AD")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::pretty_json_ad;
+
+    #[test]
+    fn pretty_json_ad_indents_an_export() {
+        let formatted = pretty_json_ad(r#"[{"@id":"internal:/issue/1","title":"Readable"}]"#)
+            .expect("a JSON-AD export formats");
+
+        assert_eq!(
+            formatted,
+            "[\n  {\n    \"@id\": \"internal:/issue/1\",\n    \"title\": \"Readable\"\n  }\n]"
+        );
+    }
 }
