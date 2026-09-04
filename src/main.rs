@@ -8,8 +8,8 @@ use anyhow::{Context, Result};
 use atomic_lib::{Store, Storelike};
 use reflector_rs::config::{env_var, Config};
 use reflector_rs::store::AtomicStorage;
-use reflector_rs::syncables::{ClientConfig, SyncClient, SyncError};
-use reflector_rs::SubjectMapper;
+use reflector_rs::{ReqwestFetch, SubjectMapper};
+use syncables::{ClientConfig, SyncClient, SyncError};
 use tracing::{info, warn};
 
 /// Paths in the configuration are resolved against this directory, so the
@@ -58,16 +58,19 @@ async fn main() -> Result<()> {
         SubjectMapper::new(config.public_url.clone()),
     );
 
-    let client = SyncClient::new(ClientConfig {
-        document: config.openapi_document.clone(),
-        overlays: config.openapi_overlays.clone(),
-        credentials: config.credentials.clone(),
-        constants: config.constants.clone(),
-        // The ontology derived from the document is minted under the same
-        // origin this store is published on, so a class URL a consumer reads
-        // out of the data actually resolves.
-        ontology_base_url: config.public_url.clone(),
-    })
+    let client = SyncClient::new(
+        ClientConfig {
+            document: config.openapi_document.clone(),
+            overlays: config.openapi_overlays.clone(),
+            credentials: config.credentials.clone(),
+            constants: config.constants.clone(),
+            // The ontology derived from the document is minted under the same
+            // origin this store is published on, so a class URL a consumer
+            // reads out of the data actually resolves.
+            ontology_base_url: config.public_url.clone(),
+        },
+        Arc::new(ReqwestFetch::new()),
+    )
     .map_err(|error| anyhow::anyhow!("{error}"))?;
 
     match client.sync(&storage).await {
@@ -79,11 +82,9 @@ async fn main() -> Result<()> {
         Err(SyncError::NotImplemented(what)) => {
             warn!(
                 "{what}\n\
-                 The host side — configuration, the Storelike, and the \
-                 subject mapping the ontology needs — is in place and \
-                 covered by tests; what is missing is the engine itself. \
-                 The API this binary calls is specified in src/syncables.rs \
-                 and tracked as issues on localthought/syncables-rs."
+                 Local-first writes (create/update/remove) are the only \
+                 part of the sync engine not implemented yet — see \
+                 https://github.com/localthought/syncables-rs/issues/9."
             );
             std::process::exit(1);
         }

@@ -1,7 +1,7 @@
 //! The [`Storelike`] the sync engine writes into.
 //!
 //! `syncables-rs` speaks plain JSON records and a neutral ontology
-//! description (see [`crate::syncables`]); this module is the half that knows
+//! description (see [`syncables`]); this module is the half that knows
 //! about Atomic Data. It renders both into Atomic Data `Resource`s and puts
 //! them in a [`Storelike`], which is where the "reflection" actually lands.
 //!
@@ -30,7 +30,7 @@ use atomic_lib::values::SubResource;
 use atomic_lib::{urls, Resource, Storelike, Subject, Value};
 
 use crate::ontology::{decode_segment, encode_segment, SubjectMapper};
-use crate::syncables::{Ontology, OntologyTerm, Record, Storage, StorageError, TermKind};
+use syncables::{Ontology, OntologyTerm, Record, Storage, StorageError, TermKind};
 
 /// Sets a property on a Resource, surfacing the failure rather than dropping
 /// it: `set_unsafe` writes through to the resource's CRDT document, so it can
@@ -39,7 +39,7 @@ macro_rules! set {
     ($resource:expr, $property:expr, $value:expr $(,)?) => {
         $resource
             .set_unsafe($property, $value)
-            .map_err(|error| StorageError(error.to_string()))?
+            .map_err(|error| StorageError::new(error.to_string()))?
     };
 }
 
@@ -272,7 +272,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
         self.store
             .add_resource_opts(&resource, false, true, true)
             .await
-            .map_err(|error| StorageError(error.to_string()))
+            .map_err(|error| StorageError::new(error.to_string()))
     }
 
     async fn get(
@@ -291,7 +291,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
             .store
             .get_resource(&subject)
             .await
-            .map_err(|error| StorageError(error.to_string()))?;
+            .map_err(|error| StorageError::new(error.to_string()))?;
         Ok(self.record_from_resource(&stored, &self.index()))
     }
 
@@ -317,7 +317,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
         self.store
             .remove_resource(&subject)
             .await
-            .map_err(|error| StorageError(error.to_string()))
+            .map_err(|error| StorageError::new(error.to_string()))
     }
 
     async fn put_ontology(&self, ontology: &Ontology) -> Result<(), StorageError> {
@@ -349,7 +349,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
             self.store
                 .add_resource_opts(&resource, false, true, true)
                 .await
-                .map_err(|error| StorageError(error.to_string()))?;
+                .map_err(|error| StorageError::new(error.to_string()))?;
         }
 
         let mut ontology_resource = Resource::new(self.mapper.internal(&ontology.path));
@@ -381,7 +381,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
         self.store
             .add_resource_opts(&ontology_resource, false, true, true)
             .await
-            .map_err(|error| StorageError(error.to_string()))?;
+            .map_err(|error| StorageError::new(error.to_string()))?;
 
         *self
             .index

@@ -8,11 +8,11 @@ This is a **scaffold**. The host side is here and tested: configuration, the
 ontology's URLs resolve, and the wiring that hands all of it to
 `client.sync()`. The sync engine it calls,
 [`localthought/syncables-rs`](https://github.com/localthought/syncables-rs),
-does not exist yet — the API this crate needs from it is written out as a
-contract in [`src/syncables.rs`](src/syncables.rs) and filed as
-[issues #1–#9](https://github.com/localthought/syncables-rs/issues) on that
-repository. Running the binary today gets as far as `client.sync()` and then
-says so.
+is depended on by git revision (it isn't published to crates.io yet) and its
+full read — resource discovery, pagination, ontology derivation — is
+implemented and tested; only local-first writes
+([issue #9](https://github.com/localthought/syncables-rs/issues/9)) are
+still to come. Running the binary today performs a full sync.
 
 Nothing in `src/` is GitHub-specific. The default configuration happens to
 point at a vendored GitHub Issues document and syncs the issues and comments
@@ -86,7 +86,7 @@ Config (src/config.rs) ──────────────┐
       │  document, overlays,         │  PUBLIC_URL
       │  credentials, constants      │
       ▼                              ▼
-SyncClient (src/syncables.rs) ── ontology_base_url
+SyncClient (syncables crate) ── ontology_base_url
       │                                    │
       │ client.sync(&storage)              │
       ▼                                    │

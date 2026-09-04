@@ -36,16 +36,14 @@ components:
         title:
           type: string
         body:
-          type:
-            - string
-            - 'null'
+          type: string
+          nullable: true
         state:
           type: string
           enum: [open, closed]
         state_reason:
-          type:
-            - string
-            - 'null'
+          type: string
+          nullable: true
         updated_at:
           type: string
           format: date-time
