@@ -215,6 +215,55 @@ covering issues and issue comments, with three overlays in
 All four files are copied from `localthought/reflector`, which uses them
 against the TypeScript engine.
 
+## WASM compatibility
+
+The **library** (`src/lib.rs`'s `config`, `http`, `ontology`, `store`
+modules, and everything `syncables` itself needs) builds for
+`wasm32-unknown-unknown` (`cargo build --target wasm32-unknown-unknown
+--lib`) — see [issue #19](https://github.com/localthought/reflector-rs/issues/19),
+which waited on [`syncables-rs` issue #25](https://github.com/localthought/syncables-rs/issues/25)
+landing first. The **binary** (`src/main.rs`) is native-only and always
+will be: it opens a real `redb` file, binds a `#[tokio::main]`
+multi-thread runtime, and (via `src/oauth.rs`) a local TCP listener for
+the interactive OAuth callback server — none of which has a wasm32
+equivalent inside a browser sandbox. A browser-hosted client is expected
+to use the library pieces with its own transport and storage, the way
+`atomic_lib`'s own [`wasm/`](https://github.com/ontola/atomic-server/tree/main/wasm)
+crate wraps its core for the same target.
+
+What that took, on top of what `syncables-rs`'s own README documents for
+itself:
+
+- **`src/oauth.rs` is `#[cfg(not(target_arch = "wasm32"))]`** (see the
+  `#[cfg]` on `pub mod oauth` in `src/lib.rs`), and its `axum`/`rand`/
+  `tokio` dependencies move to a `target.'cfg(not(target_arch =
+  "wasm32"))'.dependencies` section in `Cargo.toml` accordingly — binding
+  a TCP listener has no wasm32 equivalent, and nothing else in the
+  library needs any of the three.
+- **`atomic_lib`'s `wasm` feature** is added alongside `db-redb` for the
+  wasm32 target only (`db-redb`'s own doc comment in that fork's
+  Cargo.toml already notes it "works in WASM with InMemoryBackend"; `wasm`
+  supplies the JS-backed randomness/time that needs).
+- **`getrandom` 0.3, with its `wasm_js` feature**, is added as a direct
+  wasm32-only dependency: `ulid` (via `atomic_lib`) pulls in `rand` 0.9 →
+  `getrandom` 0.3, which — unlike the `getrandom` 0.4 `uuid` uses via
+  `syncables-rs` — needs the feature *and* a `--cfg
+  getrandom_backend="wasm_js"` rustc flag, set in `.cargo/config.toml`.
+- **`Fetch`/`Storage` impls go `?Send` on wasm32**: `http.rs`'s
+  `impl Fetch for ReqwestFetch` and `store.rs`'s `impl Storage for
+  AtomicStorage<S>` both use
+  `#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]` /
+  `#[cfg_attr(not(target_arch = "wasm32"), async_trait)]`, matching the
+  same relaxation `syncables::{Fetch, Storage}` and `atomic_lib::Storelike`
+  make on their trait definitions — wasm32 is single-threaded, and a
+  `reqwest`-over-`fetch()` or `Storelike`-backed future generally isn't
+  `Send` there.
+
+CI checks `cargo build`/`clippy --target wasm32-unknown-unknown --lib`
+separately from the native `cargo test`/`clippy --all-targets`; the
+binary and its tests (`oauth.rs`'s local-server test, `store.rs`'s `redb`
+tests) are native-only and aren't expected to build for wasm32.
+
 ## Generative AI disclosure
 
 This project follows [NLnet's Generative AI policy](https://nlnet.nl/foundation/policies/generativeAI/),

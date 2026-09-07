@@ -28,22 +28,35 @@ cargo test                # unit + integration tests; no network required except
 cargo fmt -- --check      # this repo is rustfmt-clean; run `cargo fmt` before committing
 cargo clippy --all-targets -- -D warnings   # must be warning-free
 cargo run                 # needs PUBLIC_URL at minimum; see .env.example
+cargo build --target wasm32-unknown-unknown --lib   # the library only — see below
+cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings
 ```
 
-Run all four (`fmt`, `test`, `clippy`, and a `build`) before considering a
-change done. `src/oauth.rs`'s end-to-end test binds a real local TCP
-listener (`127.0.0.1:18901`) but never reaches `github.com`; every other
-test is pure.
+Run all four native commands (`fmt`, `test`, `clippy`, and a `build`),
+plus the two wasm32 checks, before considering a change done. `src/oauth.rs`'s
+end-to-end test binds a real local TCP listener (`127.0.0.1:18901`) but
+never reaches `github.com`; every other test is pure.
+
+**The library builds for `wasm32-unknown-unknown`; the binary does not and
+never will** — see README.md's [WASM compatibility](README.md#wasm-compatibility)
+section for the full list of what that took (`src/oauth.rs` gated
+`#[cfg(not(target_arch = "wasm32"))]`, `atomic_lib`'s `wasm` feature, a
+direct `getrandom` 0.3 dependency plus `.cargo/config.toml`, and `?Send`
+on the `Fetch`/`Storage` impls). Keep it that way: a new dependency, a new
+`tokio`/`axum` feature, or a new `#[async_trait]` impl in `src/` needs
+checking against that target before it lands, and anything that only the
+*binary* needs (a real socket, a real file, an interactive prompt) belongs
+in `main.rs`, not in a `pub mod` under `src/lib.rs`.
 
 ## Module map
 
 | Module | Responsibility |
 | --- | --- |
 | `src/config.rs` | Reads all deployment configuration from environment variables (see the `env_var` module — the single source of truth for variable names, referenced from README, `.env.example`, and error messages). |
-| `src/oauth.rs` | Interactive GitHub OAuth fallback: validates a configured PAT against `GET /user`, and if that fails or no PAT is configured, runs a local web server through the authorization-code flow. Only active when `OAUTH_CLIENT_ID`/`OAUTH_CLIENT_SECRET` are set. |
-| `src/http.rs` | `ReqwestFetch`, the sync engine's one HTTP extension point (`syncables::client::client::Fetch`). |
+| `src/oauth.rs` | Interactive GitHub OAuth fallback: validates a configured PAT against `GET /user`, and if that fails or no PAT is configured, runs a local web server through the authorization-code flow. Only active when `OAUTH_CLIENT_ID`/`OAUTH_CLIENT_SECRET` are set. `#[cfg(not(target_arch = "wasm32"))]` — binds a real TCP listener, which has no wasm32 equivalent. |
+| `src/http.rs` | `ReqwestFetch`, the sync engine's one HTTP extension point (`syncables::client::client::Fetch`). Its impl is `?Send` on wasm32 (see [WASM compatibility](README.md#wasm-compatibility)). |
 | `src/ontology.rs` | `SubjectMapper` — the `internal:/…` ⇄ `<PUBLIC_URL>/…` subject mapping that keeps minted ontology terms resolvable. |
-| `src/store.rs` | `AtomicStorage` — renders `syncables-rs`'s plain JSON records and neutral ontology description into Atomic Data resources in a `Storelike`. |
+| `src/store.rs` | `AtomicStorage` — renders `syncables-rs`'s plain JSON records and neutral ontology description into Atomic Data resources in a `Storelike`. Its `Storage` impl is `?Send` on wasm32, same reason as `http.rs`. |
 | `src/main.rs` | Wires configuration, credential resolution, the store, and the sync engine together, then runs one sync and exports it as JSON-AD. |
 
 ## Conventions to preserve

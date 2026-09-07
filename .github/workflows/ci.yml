@@ -17,3 +17,8 @@ jobs:
       - run: cargo fmt --check
       - run: cargo test --locked
       - run: cargo clippy --locked --all-targets -- -D warnings
+      - name: Install wasm32-unknown-unknown target
+        run: rustup target add wasm32-unknown-unknown
+      - name: Build the library for wasm32 (the binary — main.rs's OAuth server and #[tokio::main] runtime — is native-only)
+        run: cargo build --locked --target wasm32-unknown-unknown --lib
+      - run: cargo clippy --locked --target wasm32-unknown-unknown --lib -- -D warnings

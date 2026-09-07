@@ -29,7 +29,12 @@ impl ReqwestFetch {
     }
 }
 
-#[async_trait::async_trait]
+// `reqwest`'s wasm32 backend wraps a JS `Promise`, whose future isn't
+// `Send` — that target is single-threaded, and `syncables::Fetch` relaxes
+// its own `Send` bound the same way for exactly this case (see its doc
+// comment).
+#[cfg_attr(target_arch = "wasm32", async_trait::async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait::async_trait)]
 impl Fetch for ReqwestFetch {
     async fn fetch(&self, request: HttpRequest) -> Result<HttpResponse> {
         let method = request

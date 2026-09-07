@@ -15,6 +15,10 @@
 
 pub mod config;
 pub mod http;
+// Binds a real TCP listener for the local OAuth callback server — no wasm32
+// equivalent, so this module (and its `axum`/`rand`/`tokio` dependencies)
+// is native-only. See README.md's "WASM compatibility" section.
+#[cfg(not(target_arch = "wasm32"))]
 pub mod oauth;
 pub mod ontology;
 pub mod store;

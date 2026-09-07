@@ -1,0 +1,7 @@
+# `getrandom` 0.3 (pulled in transitively via `ulid` -> `rand` 0.9, see
+# Cargo.toml's wasm32 `getrandom` dependency) needs this cfg *in addition to*
+# its `wasm_js` feature to pick a randomness backend on wasm32-unknown-unknown
+# — the feature alone is not enough. See
+# https://docs.rs/getrandom/latest/getrandom/#webassembly-support
+[target.wasm32-unknown-unknown]
+rustflags = ["--cfg", "getrandom_backend=\"wasm_js\""]
