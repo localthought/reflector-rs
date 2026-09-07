@@ -426,6 +426,21 @@ impl Config {
         })
     }
 
+    /// Identifies the complete dataset this run imports — e.g.
+    /// `localthought/test-repo-1` — derived from [`Config::constants`]'
+    /// values in key order (`owner` then `repo`, for the default document).
+    /// Every record the sync writes, root or nested, is grouped under the
+    /// *one* Drive/Document/Table this names — see
+    /// [`crate::store::AtomicStorage::with_dataset`] — rather than each
+    /// record's own (possibly deeper, per-parent) namespace.
+    pub fn dataset_namespace(&self) -> String {
+        self.constants
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+
     /// Fails early on anything the sync would only discover mid-flight: a
     /// missing document or overlay is a deployment mistake, not a sync error.
     pub fn validate(&self) -> Result<()> {
@@ -534,6 +549,16 @@ mod tests {
         let constants = parse_constants(DEFAULT_CONSTANTS).unwrap();
         assert_eq!(constants["owner"], "localthought");
         assert_eq!(constants["repo"], "test-repo-1");
+    }
+
+    #[test]
+    fn dataset_namespace_joins_constant_values_in_key_order() {
+        let config = Config::from_lookup(Path::new("/reflector"), |key| match key {
+            env_var::PUBLIC_URL => Some("http://localhost:9883".into()),
+            _ => None,
+        })
+        .unwrap();
+        assert_eq!(config.dataset_namespace(), "localthought/test-repo-1");
     }
 
     #[test]

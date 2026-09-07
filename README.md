@@ -221,6 +221,9 @@ engine's dependency tree.
 | Class | `internal:/github-issues/class/issue` | `<PUBLIC_URL>/github-issues/class/issue` |
 | Property | `internal:/github-issues/property/title` | `<PUBLIC_URL>/github-issues/property/title` |
 | Record | `internal:/localthought%2Ftest-repo-1/issue/1` | `<PUBLIC_URL>/localthought%2Ftest-repo-1/issue/1` |
+| Drive | `internal:/reflector-drives/localthought%2Ftest-repo-1` | `<PUBLIC_URL>/reflector-drives/localthought%2Ftest-repo-1` |
+| Document | `internal:/reflector-drives/localthought%2Ftest-repo-1/document` | `<PUBLIC_URL>/reflector-drives/localthought%2Ftest-repo-1/document` |
+| Table | `internal:/reflector-drives/localthought%2Ftest-repo-1/table/issue` | `<PUBLIC_URL>/reflector-drives/localthought%2Ftest-repo-1/table/issue` |
 
 Records are `internal:/<namespace>/<resource>/<id>`, each segment escaped so a
 namespace containing `/` stays a single segment. Fields are typed with the
@@ -235,14 +238,47 @@ and defaults to `data/store` (creating `data/store/atomic.redb`). Old
 `data/store.json-ad` exports are not imported automatically: run a full sync
 to populate the database.
 
-Each namespace gets a separate Drive at
-`internal:/reflector-drives/<escaped-namespace>`, named from the ontology and
-namespace: for example, **github issues localthought test-repo-1**. Issues,
-comments, and their nested resources have `parent` and `drive` pointing to
-that drive. The user's main drive is not changed. Ontology terms keep their
-shared canonical paths shown above. Repeated syncs reuse the repository drive
-and retain its permissions; updating resources builds on their stored Loro
-state.
+### The imported drive, document and table
+
+Each **imported dataset** — the complete set of records one `cargo run`
+syncs, named by `API_CONSTANTS`' values (`owner=localthought,repo=test-repo-1`
+→ `localthought/test-repo-1`) — gets *one* Drive at
+`internal:/reflector-drives/<escaped-dataset>`, named from the ontology and
+dataset: for example, **github issues localthought test-repo-1**. This is one
+Drive per dataset regardless of how many nested collections it has: issue
+comments are addressed under a deeper, per-issue namespace
+(`localthought/test-repo-1/1`, one per issue) so they still dedupe correctly,
+but they file into this same Drive rather than one of their own — a document's
+complete imported dataset, comments included, never splits across drives.
+
+Under that Drive sits one **DocumentV2** (`.../document`), and under the
+document, one native AD **Table** per root-level resource the document
+declares (just `.../table/issue` for the vendored GitHub Issues document).
+A table's `classtype` is the resource's own ontology Class, so every property
+that Class recommends or requires — for `issue`, at least number, title,
+state, body, author (`user`), updated time (`updated_at`) and source URL
+(`html_url`) — renders as a column. Every `issue` record's `parent` is that
+table (so it shows up as a row); comments and other nested records keep
+`parent` pointing straight at the Drive. Every resource's `drive` property
+(used for permission/fan-out scoping, independent of `parent`) always points
+at the Drive itself.
+
+The user's main drive is not changed. Ontology terms keep their shared
+canonical paths shown above. Repeated syncs reuse the repository Drive,
+Document and Table(s) and retain their permissions; updating resources builds
+on their stored Loro state. If `DRIVE_OWNER` is set, the Drive is also added
+to that agent's saved-drive list (idempotently) on every sync, so it's
+discoverable in the app without a manual share — this only updates an
+already-locally-stored Agent resource, never fetches or invents one.
+
+**Upgrading from before this existed:** an older reflector-rs (before
+[issue #18](https://github.com/localthought/reflector-rs/issues/18)) keyed a
+Drive off each record's own namespace, so every issue's comments fragmented
+into their own separate Drive instead of sharing the dataset's one Drive. The
+next sync against an existing store migrates automatically: the one Drive
+matching the dataset itself is reused as-is, every comment gets re-pointed at
+it as it's re-synced (routine — every sync re-puts every record), and the
+leftover per-issue Drives are removed.
 
 ### Sharing AtomicServer's database on macOS
 
@@ -272,11 +308,15 @@ is not expanded by Reflector. The binary reads process environment variables;
 it does not load `.env` automatically.
 
 Set `DRIVE_OWNER` before the first sync so your AtomicServer agent can read and
-edit the new drive. Without it, no user read/write grants are added (server
+edit the new drive — the same sync also adds it to that agent's saved-drive
+list, so it shows up in the app's drive switcher without a manual share.
+Without `DRIVE_OWNER`, no user read/write grants are added (server
 administration can still access it). Reflector never makes imported private
 issues public by default. To change permissions on an existing drive, use
 AtomicServer's sharing controls. Open the drive directly at
-`<PUBLIC_URL>/reflector-drives/localthought%2Ftest-repo-1`.
+`<PUBLIC_URL>/reflector-drives/localthought%2Ftest-repo-1`, or its document at
+`<PUBLIC_URL>/reflector-drives/localthought%2Ftest-repo-1/document` for the
+issues table.
 
 ## The vendored documents
 

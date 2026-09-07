@@ -69,6 +69,15 @@ pub struct AtomicStorage<S: Storelike> {
     /// than an `&mut self` because [`Storage`] hands out shared references.
     index: RwLock<TermIndex>,
     drive_owner: Option<String>,
+    /// Identifies the complete imported dataset this instance writes into —
+    /// e.g. `localthought/test-repo-1` — set via [`Self::with_dataset`].
+    /// Every record this instance ever `put`s, root or nested, is grouped
+    /// under the *one* Drive (and Document/Table) this names, regardless of
+    /// which namespace an individual record's own collection carries: a
+    /// nested collection (issue comments) has a deeper namespace so its
+    /// records still address and dedupe correctly, but it belongs to this
+    /// same dataset, not a namespace of its own.
+    dataset: String,
 }
 
 impl<S: Storelike> AtomicStorage<S> {
@@ -78,6 +87,7 @@ impl<S: Storelike> AtomicStorage<S> {
             mapper,
             index: RwLock::new(TermIndex::default()),
             drive_owner: None,
+            dataset: String::new(),
         }
     }
 
@@ -87,13 +97,40 @@ impl<S: Storelike> AtomicStorage<S> {
         self
     }
 
-    pub fn drive_subject(&self, namespace: &str) -> String {
-        self.mapper
-            .internal(&format!("reflector-drives/{}", encode_segment(namespace)))
+    /// Names the imported dataset (e.g. `owner/repo`) every record this
+    /// instance writes is grouped under.
+    pub fn with_dataset(mut self, dataset: impl Into<String>) -> Self {
+        self.dataset = dataset.into();
+        self
     }
 
-    async fn ensure_drive(&self, namespace: &str) -> Result<Subject, StorageError> {
-        let subject = Subject::from(self.drive_subject(namespace).as_str());
+    /// `internal:/reflector-drives/<dataset>` — the one Drive this instance's
+    /// records, Document and Table(s) all live under.
+    pub fn drive_subject(&self) -> String {
+        self.mapper.internal(&format!(
+            "reflector-drives/{}",
+            encode_segment(&self.dataset)
+        ))
+    }
+
+    /// `internal:/reflector-drives/<dataset>/document` — the one DocumentV2
+    /// this dataset's table(s) are filed under.
+    fn document_subject(&self) -> String {
+        format!("{}/document", self.drive_subject())
+    }
+
+    /// `internal:/reflector-drives/<dataset>/table/<resource>` — the native
+    /// AD table for one root-level resource of this dataset (e.g. `issue`).
+    fn table_subject(&self, resource: &str) -> String {
+        format!(
+            "{}/table/{}",
+            self.drive_subject(),
+            encode_segment(resource)
+        )
+    }
+
+    async fn ensure_drive(&self) -> Result<Subject, StorageError> {
+        let subject = Subject::from(self.drive_subject().as_str());
         if !self.store.has_stored_resource(&subject) {
             let mut drive = Resource::new(subject.to_string());
             set!(
@@ -110,7 +147,7 @@ impl<S: Storelike> AtomicStorage<S> {
             set!(
                 drive,
                 urls::NAME.to_owned(),
-                Value::String(format!("{} {}", label, namespace.replace('/', " ")))
+                Value::String(format!("{} {}", label, self.dataset.replace('/', " ")))
             );
             if let Some(owner) = &self.drive_owner {
                 for permission in [urls::READ, urls::WRITE] {
@@ -125,6 +162,188 @@ impl<S: Storelike> AtomicStorage<S> {
             }
             self.store
                 .add_resource(&drive)
+                .await
+                .map_err(|error| StorageError::new(error.to_string()))?;
+        }
+        if let Some(owner) = &self.drive_owner {
+            self.register_saved_drive(owner, &subject).await?;
+        }
+        self.migrate_legacy_drives(&subject).await?;
+        Ok(subject)
+    }
+
+    /// Adds `drive` to `owner`'s saved-drive list — the `drives` property the
+    /// Atomic Data browser reads to show a drive as one of "your" drives —
+    /// mirroring `atomic_lib`'s own (private, `Db`-specific)
+    /// `push_drive_to_list`, generalized to any [`Storelike`] since this
+    /// store isn't always a `Db`. Idempotent (an already-listed drive isn't
+    /// duplicated) and run on every call, not just when the drive is first
+    /// created, so a drive from before this existed still gets registered.
+    /// A no-op when `owner` has no local resource yet: appending to one we'd
+    /// have to fetch over the network would fight this store's local-first
+    /// design, and inventing an Agent resource here isn't this store's job.
+    async fn register_saved_drive(&self, owner: &str, drive: &Subject) -> Result<(), StorageError> {
+        let owner_subject = Subject::from(owner);
+        if !self.store.has_stored_resource(&owner_subject) {
+            return Ok(());
+        }
+        let mut agent = self
+            .store
+            .get_resource(&owner_subject)
+            .await
+            .map_err(|error| StorageError::new(error.to_string()))?;
+        let mut drives: Vec<SubResource> = match agent.get(urls::DRIVES) {
+            Ok(Value::ResourceArray(items)) => items.clone(),
+            _ => Vec::new(),
+        };
+        if drives.iter().any(|item| item.to_string() == drive.as_str()) {
+            return Ok(());
+        }
+        drives.push(SubResource::Subject(drive.clone()));
+        set!(agent, urls::DRIVES.to_owned(), Value::ResourceArray(drives));
+        self.store
+            .add_resource_opts(&agent, false, true, true)
+            .await
+            .map_err(|error| StorageError::new(error.to_string()))
+    }
+
+    /// Removes a Drive left over from before a Drive was keyed off the whole
+    /// dataset rather than each record's own namespace: a nested collection
+    /// (issue comments, one namespace per parent issue) used to fragment
+    /// into a separate Drive per parent instead of sharing this dataset's
+    /// one Drive. The records that used to point at a removed Drive are
+    /// re-pointed to `current` the next time they're `put` — `persist`
+    /// always rewrites `parent`/`drive` from the freshly computed value, so
+    /// nothing else has to migrate them — this only cleans up the
+    /// now-unreferenced Drive resources themselves.
+    async fn migrate_legacy_drives(&self, current: &Subject) -> Result<(), StorageError> {
+        if self.dataset.is_empty() {
+            return Ok(());
+        }
+        let prefix = self.mapper.internal(&format!(
+            "reflector-drives/{}%2F",
+            encode_segment(&self.dataset)
+        ));
+        let stale: Vec<Subject> = self
+            .store
+            .all_resources(false)
+            .filter_map(|resource| {
+                let subject = resource.get_subject().to_string();
+                let is_stale_drive = subject.starts_with(&prefix)
+                    && subject.as_str() != current.as_str()
+                    && resource
+                        .get(urls::IS_A)
+                        .is_ok_and(|is_a| is_a.to_string().contains(urls::DRIVE));
+                is_stale_drive.then(|| Subject::from(subject.as_str()))
+            })
+            .collect();
+        for subject in stale {
+            self.store
+                .remove_resource(&subject)
+                .await
+                .map_err(|error| StorageError::new(error.to_string()))?;
+        }
+        Ok(())
+    }
+
+    /// Ensures the one native AD table for a root-level resource (e.g.
+    /// `issue`) exists under this dataset's Document, and returns it — every
+    /// record of that resource is filed under it as `parent`, so it shows up
+    /// as a row. Falls back to `drive` for a resource this dataset's
+    /// ontology has no Class for, which shouldn't happen (the engine derives
+    /// one per `crudResources` entry) but must not fail the sync if it does.
+    async fn ensure_table(
+        &self,
+        drive: &Subject,
+        resource: &str,
+        index: &TermIndex,
+    ) -> Result<Subject, StorageError> {
+        let Some(class) = index.classes.get(&ontology_shortname(resource)) else {
+            return Ok(drive.clone());
+        };
+        let document = self.ensure_document(drive, index).await?;
+        let subject = Subject::from(self.table_subject(resource).as_str());
+        if !self.store.has_stored_resource(&subject) {
+            let mut table = Resource::new(subject.to_string());
+            set!(
+                table,
+                urls::IS_A.to_owned(),
+                Value::ResourceArray(vec![SubResource::Subject(Subject::from(urls::TABLE))])
+            );
+            set!(
+                table,
+                urls::NAME.to_owned(),
+                Value::String(table_name(resource))
+            );
+            set!(
+                table,
+                urls::CLASSTYPE_PROP.to_owned(),
+                Value::AtomicUrl(Subject::from(class.as_str()))
+            );
+            set!(
+                table,
+                urls::PARENT.to_owned(),
+                Value::AtomicUrl(document.clone())
+            );
+            set!(
+                table,
+                urls::DRIVE_PROP.to_owned(),
+                Value::AtomicUrl(drive.clone())
+            );
+            self.store
+                .add_resource(&table)
+                .await
+                .map_err(|error| StorageError::new(error.to_string()))?;
+        }
+        Ok(subject)
+    }
+
+    /// Ensures the one DocumentV2 this dataset's table(s) are filed under.
+    async fn ensure_document(
+        &self,
+        drive: &Subject,
+        index: &TermIndex,
+    ) -> Result<Subject, StorageError> {
+        let subject = Subject::from(self.document_subject().as_str());
+        if !self.store.has_stored_resource(&subject) {
+            let label = if index.ontology_path.is_empty() {
+                "reflected data".to_owned()
+            } else {
+                index.ontology_path.replace('-', " ")
+            };
+            let mut document = Resource::new(subject.to_string());
+            set!(
+                document,
+                urls::IS_A.to_owned(),
+                Value::ResourceArray(vec![SubResource::Subject(Subject::from(urls::DOCUMENT_V2))])
+            );
+            set!(
+                document,
+                urls::NAME.to_owned(),
+                Value::String(format!("{label} {}", self.dataset))
+            );
+            set!(
+                document,
+                urls::DOCUMENT_CONTENT.to_owned(),
+                Value::Markdown(format!(
+                    "# {label} {}\n\nImported by reflector-rs. The table(s) filed under \
+                     this document list the synced records; comments and other nested \
+                     data are kept in this same drive.\n",
+                    self.dataset
+                ))
+            );
+            set!(
+                document,
+                urls::PARENT.to_owned(),
+                Value::AtomicUrl(drive.clone())
+            );
+            set!(
+                document,
+                urls::DRIVE_PROP.to_owned(),
+                Value::AtomicUrl(drive.clone())
+            );
+            self.store
+                .add_resource(&document)
                 .await
                 .map_err(|error| StorageError::new(error.to_string()))?;
         }
@@ -496,7 +715,18 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
     async fn put(&self, record: &Record) -> Result<(), StorageError> {
         let index = self.index();
         let subject = self.record_subject(&record.namespace, &record.resource, &record.id);
-        let drive = self.ensure_drive(&record.namespace).await?;
+        let drive = self.ensure_drive().await?;
+        // A root-level record's namespace is exactly this dataset (no
+        // parent-provided context, e.g. `owner/repo`); a nested collection's
+        // namespace is deeper (e.g. `owner/repo/1` for one issue's
+        // comments). Only root-level records are filed under this
+        // resource's table — comments and other nested data stay filed
+        // directly under the drive, in the same drive either way.
+        let parent = if record.namespace == self.dataset {
+            self.ensure_table(&drive, &record.resource, &index).await?
+        } else {
+            drive.clone()
+        };
         let stale_prefix = format!("{subject}/");
         let stale_subjects: Vec<Subject> = self
             .store
@@ -525,7 +755,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
             set!(
                 resource,
                 urls::PARENT.to_owned(),
-                Value::AtomicUrl(drive.clone())
+                Value::AtomicUrl(parent.clone())
             );
             set!(
                 resource,
@@ -680,6 +910,21 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
             .unwrap_or_else(|poisoned| poisoned.into_inner()) = term_index;
         Ok(())
     }
+}
+
+/// A table's display name from its resource name: `issue` → `Issues`. A
+/// blunt English pluralization (an `s` suffix), good enough for the plain
+/// resource names `crudResources` declares without pulling in a real
+/// pluralization dependency for this cosmetic a purpose.
+fn table_name(resource: &str) -> String {
+    let mut name = String::with_capacity(resource.len() + 1);
+    let mut chars = resource.chars();
+    if let Some(first) = chars.next() {
+        name.extend(first.to_uppercase());
+    }
+    name.push_str(chars.as_str());
+    name.push('s');
+    name
 }
 
 /// JSON → Atomic Data. The ontology's datatype decides when it can (a string
@@ -895,6 +1140,7 @@ mod tests {
             Arc::new(store),
             SubjectMapper::new("https://my-ontologies.com"),
         )
+        .with_dataset("localthought/test-repo-1")
     }
 
     #[tokio::test]
@@ -904,6 +1150,11 @@ mod tests {
         issue
             .value
             .insert("user".into(), serde_json::json!({"login": "alice"}));
+        // A second dataset, synced by a second `AtomicStorage` (its own
+        // `dataset`) sharing the same underlying `Db` — the realistic
+        // shape of "unrelated data already in this AtomicServer database",
+        // since one reflector-rs run's `AtomicStorage` only ever writes one
+        // dataset (see `README.md`'s "Sharing AtomicServer's database").
         let mut other = issue.clone();
         other.namespace = "another/repository".into();
         let owner = "did:ad:agent:test-owner";
@@ -921,14 +1172,18 @@ mod tests {
                 .set_unsafe(urls::NAME.into(), Value::String("My main drive".into()))
                 .unwrap();
             db.add_resource(&main_drive).await.unwrap();
-            let storage = AtomicStorage::new(
-                Arc::new(db),
-                SubjectMapper::new("https://my-ontologies.com"),
-            )
-            .with_drive_owner(Some(owner.into()));
+            let db = Arc::new(db);
+            let storage =
+                AtomicStorage::new(db.clone(), SubjectMapper::new("https://my-ontologies.com"))
+                    .with_drive_owner(Some(owner.into()))
+                    .with_dataset("localthought/test-repo-1");
             storage.put_ontology(&ontology()).await.unwrap();
             storage.put(&issue).await.unwrap();
-            storage.put(&other).await.unwrap();
+            let other_storage =
+                AtomicStorage::new(db, SubjectMapper::new("https://my-ontologies.com"))
+                    .with_dataset("another/repository");
+            other_storage.put_ontology(&ontology()).await.unwrap();
+            other_storage.put(&other).await.unwrap();
             let subject = Subject::from(
                 storage
                     .record_subject(&issue.namespace, &issue.resource, &issue.id)
@@ -955,7 +1210,8 @@ mod tests {
             let storage = AtomicStorage::new(
                 Arc::new(db),
                 SubjectMapper::new("https://my-ontologies.com"),
-            );
+            )
+            .with_dataset("localthought/test-repo-1");
             storage.put_ontology(&ontology()).await.unwrap();
             assert_eq!(
                 storage
@@ -966,7 +1222,7 @@ mod tests {
                     .value["user"],
                 issue.value["user"]
             );
-            let drive = Subject::from(storage.drive_subject(&issue.namespace).as_str());
+            let drive = Subject::from(storage.drive_subject().as_str());
             let stored_drive = storage.store.get_resource(&drive).await.unwrap();
             assert!(stored_drive.get_propvals()[urls::WRITE]
                 .to_string()
@@ -1032,33 +1288,38 @@ mod tests {
         let storage = AtomicStorage::new(
             Arc::new(db),
             SubjectMapper::new("https://my-ontologies.com"),
-        );
+        )
+        .with_dataset("localthought/test-repo-1");
         storage.put_ontology(&ontology()).await.unwrap();
         assert!(storage
             .get(&issue.namespace, &issue.resource, &issue.id)
             .await
             .unwrap()
             .is_none());
+        let other_storage = AtomicStorage::new(
+            storage.store.clone(),
+            SubjectMapper::new("https://my-ontologies.com"),
+        )
+        .with_dataset("another/repository");
         assert_eq!(
-            storage
+            other_storage
                 .list(&other.namespace, &other.resource)
                 .await
                 .unwrap()
                 .len(),
             1
         );
-        assert_ne!(
-            storage.drive_subject(&issue.namespace),
-            storage.drive_subject(&other.namespace)
-        );
+        assert_ne!(storage.drive_subject(), other_storage.drive_subject());
     }
 
     #[tokio::test]
-    async fn records_belong_to_a_repository_drive() {
+    async fn root_level_records_are_filed_under_a_table_under_the_dataset_document() {
         let storage = storage().await;
         storage.put_ontology(&ontology()).await.unwrap();
         let record = record();
         storage.put(&record).await.unwrap();
+        let drive = Subject::from(storage.drive_subject().as_str());
+
         let stored = storage
             .store
             .get_resource(&Subject::from(
@@ -1068,21 +1329,63 @@ mod tests {
             ))
             .await
             .unwrap();
-        let parent = stored
-            .get_propvals()
-            .get(urls::PARENT)
-            .expect("record needs a drive")
-            .to_string();
-        let drive = storage
-            .store
-            .get_resource(&Subject::from(parent.as_str()))
-            .await
-            .unwrap();
+        // `drive` is a direct pointer to the drive root (used for ACL/fan-out
+        // scoping); `parent` is the actual containing resource — the table,
+        // not the drive — which is what makes the record show up as a row.
         assert_eq!(
-            drive.get_propvals()[urls::NAME].to_string(),
+            stored.get_propvals()[urls::DRIVE_PROP].to_string(),
+            drive.to_string()
+        );
+        let table_subject = stored.get_propvals()[urls::PARENT].to_string();
+        assert_ne!(table_subject, drive.to_string());
+
+        let table = storage
+            .store
+            .get_resource(&Subject::from(table_subject.as_str()))
+            .await
+            .expect("table");
+        assert!(table
+            .get(urls::IS_A)
+            .unwrap()
+            .to_string()
+            .contains(urls::TABLE));
+        assert_eq!(
+            table.get(urls::CLASSTYPE_PROP).unwrap().to_string(),
+            "internal:/github-issues/class/issue"
+        );
+        assert_eq!(table.get(urls::NAME).unwrap().to_string(), "Issues");
+        assert_eq!(
+            table.get(urls::DRIVE_PROP).unwrap().to_string(),
+            drive.to_string()
+        );
+
+        let document_subject = table.get(urls::PARENT).unwrap().to_string();
+        let document = storage
+            .store
+            .get_resource(&Subject::from(document_subject.as_str()))
+            .await
+            .expect("document");
+        assert!(document
+            .get(urls::IS_A)
+            .unwrap()
+            .to_string()
+            .contains(urls::DOCUMENT_V2));
+        assert!(document.get(urls::DOCUMENT_CONTENT).is_ok());
+        assert_eq!(
+            document.get(urls::PARENT).unwrap().to_string(),
+            drive.to_string()
+        );
+        assert_eq!(
+            document.get(urls::DRIVE_PROP).unwrap().to_string(),
+            drive.to_string()
+        );
+
+        let stored_drive = storage.store.get_resource(&drive).await.unwrap();
+        assert_eq!(
+            stored_drive.get_propvals()[urls::NAME].to_string(),
             "github issues localthought test-repo-1"
         );
-        assert_eq!(stored.get_propvals()[urls::DRIVE_PROP].to_string(), parent);
+
         let roundtrip = storage
             .get(&record.namespace, &record.resource, &record.id)
             .await
@@ -1090,6 +1393,125 @@ mod tests {
             .unwrap();
         assert!(!roundtrip.value.contains_key("parent"));
         assert!(!roundtrip.value.contains_key("drive"));
+    }
+
+    #[tokio::test]
+    async fn nested_collections_stay_directly_under_the_drive_not_the_table() {
+        let storage = storage().await;
+        storage.put_ontology(&ontology()).await.unwrap();
+        storage.put(&record()).await.unwrap();
+        let comment = Record {
+            namespace: "localthought/test-repo-1/1".to_owned(),
+            resource: "issueComment".to_owned(),
+            id: "5449492104".to_owned(),
+            value: serde_json::json!({ "body": "hi" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        storage.put(&comment).await.unwrap();
+
+        let stored = storage
+            .store
+            .get_resource(&Subject::from(
+                storage
+                    .record_subject(&comment.namespace, &comment.resource, &comment.id)
+                    .as_str(),
+            ))
+            .await
+            .unwrap();
+        let drive = Subject::from(storage.drive_subject().as_str());
+        // Comments are nested under a per-issue namespace ("owner/repo/1"),
+        // not the dataset's own root namespace — they file straight under
+        // the drive rather than the issues table, but the *same* drive as
+        // the root-level issue records (this is the issue #18 fix: no
+        // separate drive per comment namespace).
+        assert_eq!(
+            stored.get_propvals()[urls::PARENT].to_string(),
+            drive.to_string()
+        );
+        assert_eq!(
+            stored.get_propvals()[urls::DRIVE_PROP].to_string(),
+            drive.to_string()
+        );
+    }
+
+    #[tokio::test]
+    async fn a_pre_existing_agent_is_registered_as_a_saved_drive_idempotently() {
+        let storage = storage().await;
+        let owner = "https://example.com/agents/alice";
+        let mut agent = Resource::new(owner.to_owned());
+        agent
+            .set_unsafe(urls::NAME.into(), Value::String("Alice".into()))
+            .unwrap();
+        storage.store.add_resource(&agent).await.unwrap();
+        let storage = storage.with_drive_owner(Some(owner.to_owned()));
+
+        storage.put_ontology(&ontology()).await.unwrap();
+        storage.put(&record()).await.unwrap();
+        // A second sync (the common case: a periodic re-sync) must not
+        // duplicate the entry.
+        storage.put(&record()).await.unwrap();
+
+        let stored_agent = storage
+            .store
+            .get_resource(&Subject::from(owner))
+            .await
+            .unwrap();
+        let drives = stored_agent.get(urls::DRIVES).unwrap().to_string();
+        let drive = storage.drive_subject();
+        let occurrences = drives.matches(drive.as_str()).count();
+        assert_eq!(occurrences, 1, "{drives}");
+    }
+
+    #[tokio::test]
+    async fn a_legacy_per_namespace_drive_is_migrated_away() {
+        let storage = storage().await;
+        storage.put_ontology(&ontology()).await.unwrap();
+
+        // Simulate a Drive created by the pre-issue-18 code, keyed off a
+        // nested collection's own namespace ("owner/repo/1" for one issue's
+        // comments) rather than the whole dataset.
+        let legacy_subject = "internal:/reflector-drives/localthought%2Ftest-repo-1%2F1";
+        let mut legacy_drive = Resource::new(legacy_subject.to_owned());
+        legacy_drive
+            .set_unsafe(
+                urls::IS_A.into(),
+                Value::ResourceArray(vec![SubResource::Subject(Subject::from(urls::DRIVE))]),
+            )
+            .unwrap();
+        storage.store.add_resource(&legacy_drive).await.unwrap();
+
+        // Any `put` (comments included) re-ensures the drive and migrates.
+        let comment = Record {
+            namespace: "localthought/test-repo-1/1".to_owned(),
+            resource: "issueComment".to_owned(),
+            id: "5449492104".to_owned(),
+            value: serde_json::json!({ "body": "hi" })
+                .as_object()
+                .unwrap()
+                .clone(),
+        };
+        storage.put(&comment).await.unwrap();
+
+        assert!(!storage
+            .store
+            .has_stored_resource(&Subject::from(legacy_subject)));
+        // The now-migrated comment is re-pointed to the real drive by its
+        // own fresh `put`, unaffected by the legacy drive's removal.
+        let stored_comment = storage
+            .store
+            .get_resource(&Subject::from(
+                storage
+                    .record_subject(&comment.namespace, &comment.resource, &comment.id)
+                    .as_str(),
+            ))
+            .await
+            .unwrap();
+        assert_eq!(
+            stored_comment.get_propvals()[urls::DRIVE_PROP].to_string(),
+            storage.drive_subject()
+        );
     }
 
     #[tokio::test]
