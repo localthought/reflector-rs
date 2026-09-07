@@ -9,7 +9,7 @@ info:
     update/delete of issue comments. The full document lives in GitHub's
     rest-api-description; only the paths and schemas used here are vendored.
     The completing overlays (auth / pagination / crud-causality) are applied
-    from spec/overlays/github at startup.
+    from spec/github/overlays at startup.
 servers:
   - url: https://api.github.com
 components:

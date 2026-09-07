@@ -1,0 +1,23 @@
+overlay: 1.0.0
+info:
+  title: Google Calendar API Authentication Profile
+  version: 1.0.0
+# Unlike GitHub's PAT, a Google Calendar credential is normally obtained
+# through an interactive OAuth consent screen. reflector-rs has no generic
+# equivalent of src/oauth.rs's GitHub-specific flow (see CLAUDE.md), so this
+# platform expects the access token to already exist — minted by whatever
+# obtained it (a one-off `gcloud`/OAuth Playground exchange, another
+# service) and configured the same way a GitHub PAT is: as a static bearer
+# token. Declaring the scheme here, rather than only in the base document,
+# states that intent explicitly, the same way the GitHub auth overlay does.
+actions:
+  - target: $.components.securitySchemes
+    update:
+      googleToken:
+        type: http
+        scheme: bearer
+        description: >
+          A pre-obtained OAuth 2.0 access token with calendar read access,
+          sent as a bearer token. Supplied as deployment configuration, not
+          via an interactive flow — see GOOGLE_CALENDAR_API_TOKEN in the
+          README.
