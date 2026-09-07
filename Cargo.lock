@@ -126,7 +126,9 @@ dependencies = [
  "chacha20poly1305",
  "ed25519-dalek",
  "futures",
+ "getrandom 0.4.3",
  "hex",
+ "js-sys",
  "loro",
  "rand 0.8.8",
  "redb",
@@ -142,6 +144,9 @@ dependencies = [
  "ulid",
  "url",
  "urlencoding",
+ "wasm-bindgen",
+ "wasm-bindgen-futures",
+ "web-sys",
 ]
 
 [[package]]
@@ -897,9 +902,11 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "899def5c37c4fd7b2664648c28120ecec138e4d395b459e5ca34f9cce2dd77fd"
 dependencies = [
  "cfg-if",
+ "js-sys",
  "libc",
  "r-efi 5.3.0",
  "wasip2",
+ "wasm-bindgen",
 ]
 
 [[package]]
@@ -2132,6 +2139,7 @@ dependencies = [
  "atomic_lib",
  "axum",
  "chrono",
+ "getrandom 0.3.4",
  "indexmap",
  "rand 0.9.5",
  "reqwest",
@@ -2712,7 +2720,7 @@ dependencies = [
 [[package]]
 name = "syncables"
 version = "0.1.0"
-source = "git+https://github.com/localthought/syncables-rs?rev=2197caeb0501465f8239cc3715e78338469cb5ee#2197caeb0501465f8239cc3715e78338469cb5ee"
+source = "git+https://github.com/localthought/syncables-rs?rev=9197f14deec88e612910606a2aeafc5d846a5033#9197f14deec88e612910606a2aeafc5d846a5033"
 dependencies = [
  "async-trait",
  "httpdate",

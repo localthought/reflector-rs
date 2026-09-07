@@ -486,7 +486,12 @@ impl<S: Storelike> AtomicStorage<S> {
     }
 }
 
-#[async_trait]
+// `Storelike`'s own methods are `?Send` on wasm32 (that target is
+// single-threaded), so this impl's futures aren't `Send` there either;
+// `syncables::Storage` relaxes its own bound the same way for exactly this
+// case (see its doc comment).
+#[cfg_attr(target_arch = "wasm32", async_trait(?Send))]
+#[cfg_attr(not(target_arch = "wasm32"), async_trait)]
 impl<S: Storelike> Storage for AtomicStorage<S> {
     async fn put(&self, record: &Record) -> Result<(), StorageError> {
         let index = self.index();
