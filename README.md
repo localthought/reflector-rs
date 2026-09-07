@@ -31,7 +31,7 @@ cargo test
 PUBLIC_URL=https://my-ontologies.com API_TOKEN=ghp_… cargo run
 ```
 
-Requires a Rust toolchain (2021 edition, 1.85+). The first build fetches
+Requires a Rust toolchain (2021 edition, 1.89+). The first build fetches
 `atomic_lib` from the [ontola/atomic-server](https://github.com/ontola/atomic-server)
 repository, pinned to a revision — the crates.io release does not yet have the
 async `Storelike` and typed `Subject` this crate is written against.
@@ -48,7 +48,8 @@ Everything that varies between deployments is an environment variable. Only
 | `OPENAPI_OVERLAYS` | the three files in `spec/overlays/github/` | Comma-separated OpenAPI Overlay files, applied **in order**. |
 | `API_TOKEN` (or `GITHUB_TOKEN`) | *(none — anonymous)* | Bearer token for the API. |
 | `API_CONSTANTS` | `owner=localthought,repo=test-repo-1` | `key=value` pairs bound into the document's path/query parameters. |
-| `DATA_DIR` | `data` | Where the store is exported as JSON-AD after a sync. |
+| `STORE_DIR` | `data/store` | Directory containing the persistent `atomic.redb` database (not the file itself). |
+| `DRIVE_OWNER` | *(none)* | Agent subject to grant read/write access when a repository drive is first created. Existing drive permissions are retained. |
 | `REFLECTOR_ROOT` | the working directory | What the paths above are resolved against. |
 | `OAUTH_CLIENT_ID` (or `GITHUB_CLIENT_ID`) | *(none)* | GitHub OAuth App client id, used to authenticate when `API_TOKEN` is missing or rejected. |
 | `OAUTH_CLIENT_SECRET` (or `GITHUB_CLIENT_SECRET`) | *(none)* | GitHub OAuth App client secret, paired with `OAUTH_CLIENT_ID`. |
@@ -146,9 +147,55 @@ ontology's own properties — a field named `title` is stored under the property
 the ontology declared with shortname `title` — which is why the engine's
 contract has it store the ontology before any record.
 
-The store is in-memory today; because everything downstream is generic over
-`Storelike`, swapping in a persistent `Db` is a one-line change in
-`src/main.rs`.
+The binary opens AtomicServer's `Db` with its **redb** backend. Writes persist
+as they happen, including partial progress if a sync fails; there is no final
+JSON-AD dump. `STORE_DIR` is resolved against `REFLECTOR_ROOT` when relative,
+and defaults to `data/store` (creating `data/store/atomic.redb`). Old
+`data/store.json-ad` exports are not imported automatically: run a full sync
+to populate the database.
+
+Each namespace gets a separate Drive at
+`internal:/reflector-drives/<escaped-namespace>`, named from the ontology and
+namespace: for example, **github issues localthought test-repo-1**. Issues,
+comments, and their nested resources have `parent` and `drive` pointing to
+that drive. The user's main drive is not changed. Ontology terms keep their
+shared canonical paths shown above. Repeated syncs reuse the repository drive
+and retain its permissions; updating resources builds on their stored Loro
+state.
+
+### Sharing AtomicServer's database on macOS
+
+AtomicServer defaults to
+`~/Library/Application Support/atomic-data/store/atomic.redb` on macOS.
+**Stop AtomicServer before running Reflector against that store**, then restart
+it after the sync. redb takes an exclusive file lock: two processes cannot open
+the same database simultaneously. This is direct database access, not a live
+HTTP sync. Reflector updates the database's atom indexes, but not AtomicServer's
+separate full-text search index. Restart AtomicServer with
+`--rebuild-indexes search` to make imported content searchable.
+
+```sh
+# Stop your local AtomicServer first.
+export STORE_DIR="$HOME/Library/Application Support/atomic-data/store"
+export PUBLIC_URL="http://localhost:9883"  # match your server's public URL
+export API_CONSTANTS="owner=localthought,repo=test-repo-1"
+export DRIVE_OWNER="did:ad:agent:YOUR_PUBLIC_KEY"  # your AtomicServer agent subject
+# Export API_TOKEN if needed for the source repository.
+cargo run
+# Restart AtomicServer with --rebuild-indexes search after Reflector exits.
+```
+
+Use the **directory**, not the `atomic.redb` filename. Shell expansion of
+`$HOME` handles the home directory; a literal `~` inside an environment value
+is not expanded by Reflector. The binary reads process environment variables;
+it does not load `.env` automatically.
+
+Set `DRIVE_OWNER` before the first sync so your AtomicServer agent can read and
+edit the new drive. Without it, no user read/write grants are added (server
+administration can still access it). Reflector never makes imported private
+issues public by default. To change permissions on an existing drive, use
+AtomicServer's sharing controls. Open the drive directly at
+`<PUBLIC_URL>/reflector-drives/localthought%2Ftest-repo-1`.
 
 ## The vendored document
 

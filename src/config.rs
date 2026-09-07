@@ -37,8 +37,10 @@ pub mod env_var {
     pub const API_CONSTANTS: &str = "API_CONSTANTS";
     /// Public origin (optionally with a path) this store is served under.
     pub const PUBLIC_URL: &str = "PUBLIC_URL";
-    /// Directory the store is exported to as JSON-AD after a sync.
-    pub const DATA_DIR: &str = "DATA_DIR";
+    /// Directory containing AtomicServer's atomic.redb database.
+    pub const STORE_DIR: &str = "STORE_DIR";
+    /// Optional agent granted read/write access to newly created drives.
+    pub const DRIVE_OWNER: &str = "DRIVE_OWNER";
     /// OAuth client id for the interactive GitHub authorization-code flow,
     /// used when [`API_TOKEN`] is missing or no longer accepted.
     pub const OAUTH_CLIENT_ID: &str = "OAUTH_CLIENT_ID";
@@ -79,8 +81,10 @@ pub struct Config {
     /// The origin (and optional base path) this store's data is public under,
     /// e.g. `https://my-ontologies.com`. No trailing slash.
     pub public_url: String,
-    /// Where a JSON-AD export of the store is written after a sync.
-    pub data_dir: PathBuf,
+    /// Directory containing atomic.redb.
+    pub store_dir: PathBuf,
+    /// Optional agent granted read/write access to newly created drives.
+    pub drive_owner: Option<String>,
     /// The interactive OAuth fallback, present only when both
     /// [`env_var::OAUTH_CLIENT_ID`] and [`env_var::OAUTH_CLIENT_SECRET`] (or
     /// their `GITHUB_*` aliases) are set.
@@ -188,12 +192,16 @@ impl Config {
     /// relative to `root` (the crate directory, so the vendored `spec/` works
     /// out of the box).
     pub fn from_env(root: &Path) -> Result<Self> {
+        Self::from_lookup(root, var)
+    }
+
+    fn from_lookup(root: &Path, get: impl Fn(&str) -> Option<String>) -> Result<Self> {
         let openapi_document = root.join(
-            var(env_var::OPENAPI_DOCUMENT)
+            get(env_var::OPENAPI_DOCUMENT)
                 .unwrap_or_else(|| "spec/github-issues.openapi.yaml".to_owned()),
         );
 
-        let overlays = var(env_var::OPENAPI_OVERLAYS).unwrap_or_else(|| {
+        let overlays = get(env_var::OPENAPI_OVERLAYS).unwrap_or_else(|| {
             [
                 "spec/overlays/github/auth-overlay.yaml",
                 "spec/overlays/github/pagination-overlay.yaml",
@@ -206,13 +214,13 @@ impl Config {
             .map(|path| root.join(path))
             .collect();
 
-        let credentials = match var(env_var::API_TOKEN).or_else(|| var(env_var::GITHUB_TOKEN)) {
+        let credentials = match get(env_var::API_TOKEN).or_else(|| get(env_var::GITHUB_TOKEN)) {
             Some(token) => Credentials::Bearer(token),
             None => Credentials::Anonymous,
         };
 
         let constants = parse_constants(
-            &var(env_var::API_CONSTANTS).unwrap_or_else(|| DEFAULT_CONSTANTS.to_owned()),
+            &get(env_var::API_CONSTANTS).unwrap_or_else(|| DEFAULT_CONSTANTS.to_owned()),
         )
         .with_context(|| format!("{} is malformed", env_var::API_CONSTANTS))?;
 
@@ -220,7 +228,7 @@ impl Config {
         // the wrong origin would carry subjects that resolve to somebody
         // else's server, so guessing `localhost` here would be worse than
         // refusing to start.
-        let public_url = var(env_var::PUBLIC_URL).ok_or_else(|| {
+        let public_url = get(env_var::PUBLIC_URL).ok_or_else(|| {
             anyhow!(
                 "{} is required — it is the origin this store's data (and the \
                  minted ontology's class/property URLs) is public under, e.g. \
@@ -230,13 +238,15 @@ impl Config {
         })?;
         let public_url = normalize_public_url(&public_url)?;
 
-        let data_dir = root.join(var(env_var::DATA_DIR).unwrap_or_else(|| "data".to_owned()));
+        let store_dir =
+            root.join(get(env_var::STORE_DIR).unwrap_or_else(|| "data/store".to_owned()));
+        let drive_owner = get(env_var::DRIVE_OWNER);
 
         let oauth = resolve_oauth_settings(
-            var(env_var::OAUTH_CLIENT_ID).or_else(|| var(env_var::GITHUB_CLIENT_ID)),
-            var(env_var::OAUTH_CLIENT_SECRET).or_else(|| var(env_var::GITHUB_CLIENT_SECRET)),
-            var(env_var::OAUTH_REDIRECT_ADDR),
-            var(env_var::OAUTH_SCOPE),
+            get(env_var::OAUTH_CLIENT_ID).or_else(|| get(env_var::GITHUB_CLIENT_ID)),
+            get(env_var::OAUTH_CLIENT_SECRET).or_else(|| get(env_var::GITHUB_CLIENT_SECRET)),
+            get(env_var::OAUTH_REDIRECT_ADDR),
+            get(env_var::OAUTH_SCOPE),
         )?;
 
         Ok(Config {
@@ -245,7 +255,8 @@ impl Config {
             credentials,
             constants,
             public_url,
-            data_dir,
+            store_dir,
+            drive_owner,
             oauth,
         })
     }
@@ -298,6 +309,25 @@ fn normalize_public_url(raw: &str) -> Result<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn store_directory_defaults_and_resolves_relative_to_root() {
+        for (configured, expected) in [
+            (None, "/reflector/data/store"),
+            (Some("custom"), "/reflector/custom"),
+            (Some("/shared/store"), "/shared/store"),
+        ] {
+            let config = Config::from_lookup(Path::new("/reflector"), |key| match key {
+                env_var::PUBLIC_URL => Some("http://localhost:9883".into()),
+                env_var::STORE_DIR => configured.map(str::to_owned),
+                env_var::DRIVE_OWNER => Some("did:ad:agent:owner".into()),
+                _ => None,
+            })
+            .unwrap();
+            assert_eq!(config.store_dir, PathBuf::from(expected));
+            assert_eq!(config.drive_owner.as_deref(), Some("did:ad:agent:owner"));
+        }
+    }
 
     #[test]
     fn parses_key_value_constants() {
