@@ -61,14 +61,14 @@ struct TermIndex {
 /// An Atomic Data [`Storelike`] presented to the sync engine as a
 /// [`Storage`].
 ///
-/// Generic over the store: the in-memory `atomic_lib::Store` is enough for a
-/// scaffold, and a persistent `Db` (or a remote store) drops in unchanged.
+/// The binary uses a persistent redb `Db`; unit tests can use an in-memory store.
 pub struct AtomicStorage<S: Storelike> {
     store: Arc<S>,
     mapper: SubjectMapper,
     /// Filled by `put_ontology`; read on every record write. A lock rather
     /// than an `&mut self` because [`Storage`] hands out shared references.
     index: RwLock<TermIndex>,
+    drive_owner: Option<String>,
 }
 
 impl<S: Storelike> AtomicStorage<S> {
@@ -77,7 +77,91 @@ impl<S: Storelike> AtomicStorage<S> {
             store,
             mapper,
             index: RwLock::new(TermIndex::default()),
+            drive_owner: None,
         }
+    }
+
+    /// Grant this agent access when creating a drive; existing ACLs are retained.
+    pub fn with_drive_owner(mut self, owner: Option<String>) -> Self {
+        self.drive_owner = owner;
+        self
+    }
+
+    pub fn drive_subject(&self, namespace: &str) -> String {
+        self.mapper
+            .internal(&format!("reflector-drives/{}", encode_segment(namespace)))
+    }
+
+    async fn ensure_drive(&self, namespace: &str) -> Result<Subject, StorageError> {
+        let subject = Subject::from(self.drive_subject(namespace).as_str());
+        if !self.store.has_stored_resource(&subject) {
+            let mut drive = Resource::new(subject.to_string());
+            set!(
+                drive,
+                urls::IS_A.to_owned(),
+                Value::ResourceArray(vec![SubResource::Subject(Subject::from(urls::DRIVE))])
+            );
+            let index = self.index();
+            let label = if index.ontology_path.is_empty() {
+                "reflected data".to_owned()
+            } else {
+                index.ontology_path.replace('-', " ")
+            };
+            set!(
+                drive,
+                urls::NAME.to_owned(),
+                Value::String(format!("{} {}", label, namespace.replace('/', " ")))
+            );
+            if let Some(owner) = &self.drive_owner {
+                for permission in [urls::READ, urls::WRITE] {
+                    set!(
+                        drive,
+                        permission.to_owned(),
+                        Value::ResourceArray(vec![SubResource::Subject(Subject::from(
+                            owner.as_str()
+                        ))])
+                    );
+                }
+            }
+            self.store
+                .add_resource(&drive)
+                .await
+                .map_err(|error| StorageError::new(error.to_string()))?;
+        }
+        Ok(subject)
+    }
+
+    /// Replace the projection while retaining the stored CRDT's history.
+    async fn persist(&self, desired: &Resource, validate: bool) -> Result<(), StorageError> {
+        let mut resource = if self.store.has_stored_resource(desired.get_subject()) {
+            self.store
+                .get_resource(desired.get_subject())
+                .await
+                .map_err(|error| StorageError::new(error.to_string()))?
+        } else {
+            Resource::new(desired.get_subject().to_string())
+        };
+        let removed: Vec<String> = resource
+            .get_propvals()
+            .keys()
+            .filter(|property| {
+                property.as_str() != urls::LORO_UPDATE
+                    && !desired.get_propvals().contains_key(*property)
+            })
+            .cloned()
+            .collect();
+        for property in removed {
+            resource
+                .remove_propval(&property)
+                .map_err(|error| StorageError::new(error.to_string()))?;
+        }
+        for (property, value) in desired.get_propvals() {
+            set!(resource, property.clone(), value.clone());
+        }
+        self.store
+            .add_resource_opts(&resource, validate, true, true)
+            .await
+            .map_err(|error| StorageError::new(error.to_string()))
     }
 
     pub fn store(&self) -> &Arc<S> {
@@ -162,7 +246,10 @@ impl<S: Storelike> AtomicStorage<S> {
 
         let mut value = serde_json::Map::new();
         for (property, stored) in resource.get_propvals() {
-            if property == urls::IS_A {
+            if matches!(
+                property.as_str(),
+                urls::IS_A | urls::PARENT | urls::DRIVE_PROP | urls::LORO_UPDATE
+            ) {
                 continue;
             }
             let field = match shortnames.get(property.as_str()) {
@@ -239,7 +326,10 @@ impl<S: Storelike> AtomicStorage<S> {
             .collect();
         let mut object = serde_json::Map::new();
         for (property, value) in resource.get_propvals() {
-            if property == urls::IS_A {
+            if matches!(
+                property.as_str(),
+                urls::IS_A | urls::PARENT | urls::DRIVE_PROP | urls::LORO_UPDATE
+            ) {
                 continue;
             }
             let field = reverse
@@ -401,6 +491,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
     async fn put(&self, record: &Record) -> Result<(), StorageError> {
         let index = self.index();
         let subject = self.record_subject(&record.namespace, &record.resource, &record.id);
+        let drive = self.ensure_drive(&record.namespace).await?;
         let stale_prefix = format!("{subject}/");
         let stale_subjects: Vec<Subject> = self
             .store
@@ -412,12 +503,6 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
                     .then(|| Subject::from(candidate.as_str()))
             })
             .collect();
-        for stale in stale_subjects {
-            self.store
-                .remove_resource(&stale)
-                .await
-                .map_err(|error| StorageError::new(error.to_string()))?;
-        }
         let resources = self.resources_for_object(
             subject,
             index
@@ -427,11 +512,30 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
             &record.value,
             &index,
         )?;
-        for resource in resources {
-            self.store
-                .add_resource(&resource)
-                .await
-                .map_err(|error| StorageError::new(error.to_string()))?;
+        let current_subjects: Vec<Subject> = resources
+            .iter()
+            .map(|resource| resource.get_subject().clone())
+            .collect();
+        for mut resource in resources {
+            set!(
+                resource,
+                urls::PARENT.to_owned(),
+                Value::AtomicUrl(drive.clone())
+            );
+            set!(
+                resource,
+                urls::DRIVE_PROP.to_owned(),
+                Value::AtomicUrl(drive.clone())
+            );
+            self.persist(&resource, true).await?;
+        }
+        for stale in stale_subjects {
+            if !current_subjects.contains(&stale) {
+                self.store
+                    .remove_resource(&stale)
+                    .await
+                    .map_err(|error| StorageError::new(error.to_string()))?;
+            }
         }
         Ok(())
     }
@@ -534,10 +638,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
                 }
             }
             let resource = self.term_resource(ontology, term)?;
-            self.store
-                .add_resource_opts(&resource, false, true, true)
-                .await
-                .map_err(|error| StorageError::new(error.to_string()))?;
+            self.persist(&resource, false).await?;
         }
 
         let mut ontology_resource = Resource::new(self.mapper.internal(&ontology.path));
@@ -566,10 +667,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
             urls::PROPERTIES.to_owned(),
             Value::ResourceArray(properties)
         );
-        self.store
-            .add_resource_opts(&ontology_resource, false, true, true)
-            .await
-            .map_err(|error| StorageError::new(error.to_string()))?;
+        self.persist(&ontology_resource, false).await?;
 
         *self
             .index
@@ -792,6 +890,201 @@ mod tests {
             Arc::new(store),
             SubjectMapper::new("https://my-ontologies.com"),
         )
+    }
+
+    #[tokio::test]
+    async fn redb_survives_restart_and_preserves_other_drives_and_crdt_history() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut issue = record();
+        issue
+            .value
+            .insert("user".into(), serde_json::json!({"login": "alice"}));
+        let mut other = issue.clone();
+        other.namespace = "another/repository".into();
+        let owner = "did:ad:agent:test-owner";
+        let original_version;
+        {
+            let db = atomic_lib::Db::init_redb_file(
+                dir.path(),
+                Some("https://my-ontologies.com".into()),
+                dir.path(),
+            )
+            .await
+            .unwrap();
+            let mut main_drive = Resource::new("internal:/user-main-drive".into());
+            main_drive
+                .set_unsafe(urls::NAME.into(), Value::String("My main drive".into()))
+                .unwrap();
+            db.add_resource(&main_drive).await.unwrap();
+            let storage = AtomicStorage::new(
+                Arc::new(db),
+                SubjectMapper::new("https://my-ontologies.com"),
+            )
+            .with_drive_owner(Some(owner.into()));
+            storage.put_ontology(&ontology()).await.unwrap();
+            storage.put(&issue).await.unwrap();
+            storage.put(&other).await.unwrap();
+            let subject = Subject::from(
+                storage
+                    .record_subject(&issue.namespace, &issue.resource, &issue.id)
+                    .as_str(),
+            );
+            original_version = storage
+                .store
+                .get_resource(&subject)
+                .await
+                .unwrap()
+                .build_state_doc()
+                .unwrap()
+                .oplog_vv_map();
+        }
+        assert!(dir.path().join("atomic.redb").is_file());
+        {
+            let db = atomic_lib::Db::init_redb_file(
+                dir.path(),
+                Some("https://my-ontologies.com".into()),
+                dir.path(),
+            )
+            .await
+            .unwrap();
+            let storage = AtomicStorage::new(
+                Arc::new(db),
+                SubjectMapper::new("https://my-ontologies.com"),
+            );
+            storage.put_ontology(&ontology()).await.unwrap();
+            assert_eq!(
+                storage
+                    .get(&issue.namespace, &issue.resource, &issue.id)
+                    .await
+                    .unwrap()
+                    .unwrap()
+                    .value["user"],
+                issue.value["user"]
+            );
+            let drive = Subject::from(storage.drive_subject(&issue.namespace).as_str());
+            let stored_drive = storage.store.get_resource(&drive).await.unwrap();
+            assert!(stored_drive.get_propvals()[urls::WRITE]
+                .to_string()
+                .contains(owner));
+            let child = Subject::from(
+                format!(
+                    "{}/user",
+                    storage.record_subject(&issue.namespace, &issue.resource, &issue.id)
+                )
+                .as_str(),
+            );
+            assert_eq!(
+                storage
+                    .store
+                    .get_resource(&child)
+                    .await
+                    .unwrap()
+                    .get_propvals()[urls::DRIVE_PROP]
+                    .to_string(),
+                drive.to_string()
+            );
+            issue
+                .value
+                .insert("title".into(), serde_json::json!("Updated"));
+            issue.value.remove("user");
+            storage.put(&issue).await.unwrap();
+            assert!(!storage.store.has_stored_resource(&child));
+            let subject = Subject::from(
+                storage
+                    .record_subject(&issue.namespace, &issue.resource, &issue.id)
+                    .as_str(),
+            );
+            let updated = storage.store.get_resource(&subject).await.unwrap();
+            let version = updated.build_state_doc().unwrap().oplog_vv_map();
+            for (peer, counter) in original_version {
+                assert!(
+                    version.get(&peer).is_some_and(|new| *new >= counter),
+                    "lost CRDT history"
+                );
+            }
+            assert_eq!(
+                storage
+                    .store
+                    .get_resource(&Subject::from("internal:/user-main-drive"))
+                    .await
+                    .unwrap()
+                    .get_propvals()[urls::NAME]
+                    .to_string(),
+                "My main drive"
+            );
+            storage
+                .delete(&issue.namespace, &issue.resource, &issue.id)
+                .await
+                .unwrap();
+        }
+        let db = atomic_lib::Db::init_redb_file(
+            dir.path(),
+            Some("https://my-ontologies.com".into()),
+            dir.path(),
+        )
+        .await
+        .unwrap();
+        let storage = AtomicStorage::new(
+            Arc::new(db),
+            SubjectMapper::new("https://my-ontologies.com"),
+        );
+        storage.put_ontology(&ontology()).await.unwrap();
+        assert!(storage
+            .get(&issue.namespace, &issue.resource, &issue.id)
+            .await
+            .unwrap()
+            .is_none());
+        assert_eq!(
+            storage
+                .list(&other.namespace, &other.resource)
+                .await
+                .unwrap()
+                .len(),
+            1
+        );
+        assert_ne!(
+            storage.drive_subject(&issue.namespace),
+            storage.drive_subject(&other.namespace)
+        );
+    }
+
+    #[tokio::test]
+    async fn records_belong_to_a_repository_drive() {
+        let storage = storage().await;
+        storage.put_ontology(&ontology()).await.unwrap();
+        let record = record();
+        storage.put(&record).await.unwrap();
+        let stored = storage
+            .store
+            .get_resource(&Subject::from(
+                storage
+                    .record_subject(&record.namespace, &record.resource, &record.id)
+                    .as_str(),
+            ))
+            .await
+            .unwrap();
+        let parent = stored
+            .get_propvals()
+            .get(urls::PARENT)
+            .expect("record needs a drive")
+            .to_string();
+        let drive = storage
+            .store
+            .get_resource(&Subject::from(parent.as_str()))
+            .await
+            .unwrap();
+        assert_eq!(
+            drive.get_propvals()[urls::NAME].to_string(),
+            "github issues localthought test-repo-1"
+        );
+        assert_eq!(stored.get_propvals()[urls::DRIVE_PROP].to_string(), parent);
+        let roundtrip = storage
+            .get(&record.namespace, &record.resource, &record.id)
+            .await
+            .unwrap()
+            .unwrap();
+        assert!(!roundtrip.value.contains_key("parent"));
+        assert!(!roundtrip.value.contains_key("drive"));
     }
 
     #[tokio::test]
