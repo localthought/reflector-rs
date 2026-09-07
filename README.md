@@ -50,6 +50,35 @@ Everything that varies between deployments is an environment variable. Only
 | `API_CONSTANTS` | `owner=localthought,repo=test-repo-1` | `key=value` pairs bound into the document's path/query parameters. |
 | `DATA_DIR` | `data` | Where the store is exported as JSON-AD after a sync. |
 | `REFLECTOR_ROOT` | the working directory | What the paths above are resolved against. |
+| `OAUTH_CLIENT_ID` (or `GITHUB_CLIENT_ID`) | *(none)* | GitHub OAuth App client id, used to authenticate when `API_TOKEN` is missing or rejected. |
+| `OAUTH_CLIENT_SECRET` (or `GITHUB_CLIENT_SECRET`) | *(none)* | GitHub OAuth App client secret, paired with `OAUTH_CLIENT_ID`. |
+| `OAUTH_REDIRECT_ADDR` | `127.0.0.1:8901` | `host:port` the local OAuth callback web server binds to. |
+| `OAUTH_SCOPE` | `repo` | OAuth scope requested from GitHub during the authorization-code flow. |
+
+### Authenticating with GitHub
+
+By default a request carries whatever `API_TOKEN`/`GITHUB_TOKEN` names — a
+personal access or installation token — or no `Authorization` header at all.
+
+Setting `OAUTH_CLIENT_ID` and `OAUTH_CLIENT_SECRET` (both are required
+together) — the client id and secret of a
+[GitHub OAuth App](https://docs.github.com/en/apps/oauth-apps) whose
+"Authorization callback URL" is `http://<OAUTH_REDIRECT_ADDR>/callback` —
+turns on an interactive fallback:
+
+1. If `API_TOKEN` is set, it is checked against `GET /user`. If GitHub still
+   accepts it, the sync proceeds with that token and nothing else happens.
+2. Otherwise (the token is missing, expired, or revoked), reflector-rs starts
+   a small local web server and prints its URL. Opening it in a browser and
+   clicking through GitHub's consent screen redirects back to `/callback`,
+   which exchanges the authorization code for an access token and lets the
+   sync proceed with it.
+
+No token is ever written to disk by this crate; a fresh run with no valid
+`API_TOKEN` repeats the browser step. This is implemented in
+[`src/oauth.rs`](src/oauth.rs) and never runs at all — not even the PAT
+validity check — unless both OAuth variables are set, so a deployment that
+only ever sets `API_TOKEN` is unaffected.
 
 ### Why `PUBLIC_URL` is required
 

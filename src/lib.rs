@@ -15,6 +15,7 @@
 
 pub mod config;
 pub mod http;
+pub mod oauth;
 pub mod ontology;
 pub mod store;
 

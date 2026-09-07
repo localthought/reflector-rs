@@ -20,10 +20,16 @@ syncables = { git = "https://github.com/localthought/syncables-rs", rev = "2197c
 
 anyhow = "1"
 async-trait = "0.1"
+# The OAuth fallback's local callback server (src/oauth.rs) — a web interface
+# for the authorization-code dance when no valid API_TOKEN is configured.
+axum = "0.8"
 chrono = "0.4"
 indexmap = "2"
-reqwest = "0.13"
+rand = "0.9"
+reqwest = { version = "0.13", features = ["form", "json"] }
+serde = { version = "1", features = ["derive"] }
 serde_json = "1"
-tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
+tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+urlencoding = "2"
