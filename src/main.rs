@@ -68,7 +68,8 @@ async fn main() -> Result<()> {
         Arc::new(store),
         SubjectMapper::new(config.public_url.clone()),
     )
-    .with_drive_owner(config.drive_owner.clone());
+    .with_drive_owner(config.drive_owner.clone())
+    .with_dataset(config.dataset_namespace());
 
     let client = SyncClient::new(
         ClientConfig {

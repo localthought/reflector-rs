@@ -56,7 +56,7 @@ in `main.rs`, not in a `pub mod` under `src/lib.rs`.
 | `src/oauth.rs` | Interactive GitHub OAuth fallback: validates a configured PAT against `GET /user`, and if that fails or no PAT is configured, runs a local web server through the authorization-code flow. Only active when `OAUTH_CLIENT_ID`/`OAUTH_CLIENT_SECRET` are set. `#[cfg(not(target_arch = "wasm32"))]` — binds a real TCP listener, which has no wasm32 equivalent. |
 | `src/http.rs` | `ReqwestFetch`, the sync engine's one HTTP extension point (`syncables::client::client::Fetch`). Its impl is `?Send` on wasm32 (see [WASM compatibility](README.md#wasm-compatibility)). |
 | `src/ontology.rs` | `SubjectMapper` — the `internal:/…` ⇄ `<PUBLIC_URL>/…` subject mapping that keeps minted ontology terms resolvable. |
-| `src/store.rs` | `AtomicStorage` — renders `syncables-rs`'s plain JSON records and neutral ontology description into Atomic Data resources in a `Storelike`. Its `Storage` impl is `?Send` on wasm32, same reason as `http.rs`. |
+| `src/store.rs` | `AtomicStorage` — renders `syncables-rs`'s plain JSON records and neutral ontology description into Atomic Data resources in a `Storelike`, grouped under one Drive/DocumentV2/Table per imported dataset (`with_dataset`). Its `Storage` impl is `?Send` on wasm32, same reason as `http.rs`. |
 | `src/main.rs` | Wires configuration, credential resolution, the store, and the sync engine together, then runs one sync and exports it as JSON-AD. |
 
 ## Conventions to preserve

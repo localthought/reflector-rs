@@ -47,6 +47,10 @@ components:
         updated_at:
           type: string
           format: date-time
+        html_url:
+          type: string
+          format: uri
+          description: The issue's page on github.com — its source URL.
         user:
           $ref: '#/components/schemas/user'
         labels:
