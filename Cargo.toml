@@ -2,7 +2,7 @@
 name = "reflector-rs"
 version = "0.1.0"
 edition = "2021"
-rust-version = "1.85"
+rust-version = "1.89"
 license = "Apache-2.0"
 description = "Reflects a REST API described by an OpenAPI document + Overlays into an Atomic Data Storelike."
 repository = "https://github.com/localthought/reflector-rs"
@@ -12,7 +12,7 @@ repository = "https://github.com/localthought/reflector-rs"
 # ontola fork rather than the crates.io release: this scaffold is written
 # against that fork's async `Storelike` and typed `Subject` (`internal:/…`),
 # which the published 0.40 does not have yet.
-atomic_lib = { git = "https://github.com/ontola/atomic-server", rev = "fc045025536c1694b0c0d63024cb5ebe2db3d5c0" }
+atomic_lib = { git = "https://github.com/ontola/atomic-server", rev = "fc045025536c1694b0c0d63024cb5ebe2db3d5c0", features = ["db-redb"] }
 
 # `syncables-rs` is the sync engine this binary is a host for. Not published
 # to crates.io yet, so it's pinned to a revision by git instead.
@@ -27,3 +27,6 @@ serde_json = "1"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
+
+[dev-dependencies]
+tempfile = "3"
