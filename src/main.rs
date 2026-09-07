@@ -41,9 +41,18 @@ async fn main() -> Result<()> {
         overlays = config.openapi_overlays.len(),
         public_url = %config.public_url,
         constants = ?config.constants,
-        credentials = ?config.credentials,
+        oauth_configured = config.oauth.is_some(),
         "reflector-rs starting"
     );
+
+    // Falls back to the interactive GitHub OAuth flow (src/oauth.rs) when
+    // API_TOKEN/GITHUB_TOKEN is missing or no longer accepted and an OAuth
+    // App's client id/secret is configured; otherwise this is a no-op.
+    let credentials =
+        reflector_rs::oauth::resolve_credentials(&config.credentials, config.oauth.as_ref())
+            .await
+            .context("resolving credentials")?;
+    info!(credentials = ?credentials, "credentials resolved");
 
     let store = Db::init_redb_file(
         &config.store_dir,
@@ -65,7 +74,7 @@ async fn main() -> Result<()> {
         ClientConfig {
             document: config.openapi_document.clone(),
             overlays: config.openapi_overlays.clone(),
-            credentials: config.credentials.clone(),
+            credentials,
             constants: config.constants.clone(),
             // The ontology derived from the document is minted under the same
             // origin this store is published on, so a class URL a consumer

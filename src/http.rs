@@ -12,8 +12,10 @@ use indexmap::IndexMap;
 use syncables::client::client::{Fetch, HttpRequest, HttpResponse};
 use syncables::{Error, Result};
 
-/// Identifies reflector to API hosts which reject requests without a user agent.
-const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
+/// Identifies reflector to API hosts which reject requests without a user
+/// agent. Also used by [`crate::oauth`] for the plain `reqwest` calls it
+/// makes outside the sync engine (checking a PAT, exchanging an OAuth code).
+pub(crate) const USER_AGENT: &str = concat!(env!("CARGO_PKG_NAME"), "/", env!("CARGO_PKG_VERSION"));
 
 /// Sends requests with a shared [`reqwest::Client`].
 #[derive(Clone, Debug, Default)]

@@ -41,7 +41,27 @@ pub mod env_var {
     pub const STORE_DIR: &str = "STORE_DIR";
     /// Optional agent granted read/write access to newly created drives.
     pub const DRIVE_OWNER: &str = "DRIVE_OWNER";
+    /// OAuth client id for the interactive GitHub authorization-code flow,
+    /// used when [`API_TOKEN`] is missing or no longer accepted.
+    pub const OAUTH_CLIENT_ID: &str = "OAUTH_CLIENT_ID";
+    /// Legacy/convenience alias for [`OAUTH_CLIENT_ID`].
+    pub const GITHUB_CLIENT_ID: &str = "GITHUB_CLIENT_ID";
+    /// OAuth client secret paired with [`OAUTH_CLIENT_ID`].
+    pub const OAUTH_CLIENT_SECRET: &str = "OAUTH_CLIENT_SECRET";
+    /// Legacy/convenience alias for [`OAUTH_CLIENT_SECRET`].
+    pub const GITHUB_CLIENT_SECRET: &str = "GITHUB_CLIENT_SECRET";
+    /// `host:port` the local OAuth callback web server binds to.
+    pub const OAUTH_REDIRECT_ADDR: &str = "OAUTH_REDIRECT_ADDR";
+    /// OAuth scope requested during the authorization-code flow.
+    pub const OAUTH_SCOPE: &str = "OAUTH_SCOPE";
 }
+
+/// Default `host:port` the local OAuth callback server binds to.
+pub const DEFAULT_OAUTH_REDIRECT_ADDR: &str = "127.0.0.1:8901";
+
+/// Default OAuth scope: read access to a user's repositories, matching what
+/// the vendored GitHub Issues document needs.
+pub const DEFAULT_OAUTH_SCOPE: &str = "repo";
 
 /// Which repository this scaffold points at by default: the issue tracker the
 /// first milestone syncs, rather than every tracker the token can read.
@@ -63,7 +83,74 @@ pub struct Config {
     pub public_url: String,
     /// Directory containing atomic.redb.
     pub store_dir: PathBuf,
+    /// Optional agent granted read/write access to newly created drives.
     pub drive_owner: Option<String>,
+    /// The interactive OAuth fallback, present only when both
+    /// [`env_var::OAUTH_CLIENT_ID`] and [`env_var::OAUTH_CLIENT_SECRET`] (or
+    /// their `GITHUB_*` aliases) are set.
+    pub oauth: Option<OAuthSettings>,
+}
+
+/// An OAuth App's credentials, used to run the interactive
+/// authorization-code flow (see [`crate::oauth`]) when [`Config::credentials`]
+/// is missing or no longer accepted by GitHub.
+#[derive(Clone)]
+pub struct OAuthSettings {
+    /// The OAuth App's client id. Not secret, but grouped with the secret
+    /// since the two are only ever configured together.
+    pub client_id: String,
+    /// The OAuth App's client secret.
+    pub client_secret: String,
+    /// `host:port` the local callback web server binds to; also the host of
+    /// the `redirect_uri` registered with the OAuth App.
+    pub redirect_addr: String,
+    /// The scope requested from GitHub during the authorization-code flow.
+    pub scope: String,
+}
+
+impl std::fmt::Debug for OAuthSettings {
+    /// Never renders the secret, matching [`Credentials`]'s `Debug` impl —
+    /// a host logging its resolved configuration at startup is exactly the
+    /// scenario this guards against.
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("OAuthSettings")
+            .field("client_id", &self.client_id)
+            .field("client_secret", &"<redacted>")
+            .field("redirect_addr", &self.redirect_addr)
+            .field("scope", &self.scope)
+            .finish()
+    }
+}
+
+/// Builds the OAuth fallback settings from its four raw parts, or `None` if
+/// neither client id nor secret was configured. Kept separate from
+/// [`Config::from_env`] so it can be unit-tested without touching the
+/// process environment.
+fn resolve_oauth_settings(
+    client_id: Option<String>,
+    client_secret: Option<String>,
+    redirect_addr: Option<String>,
+    scope: Option<String>,
+) -> Result<Option<OAuthSettings>> {
+    match (client_id, client_secret) {
+        (None, None) => Ok(None),
+        (Some(client_id), Some(client_secret)) => Ok(Some(OAuthSettings {
+            client_id,
+            client_secret,
+            redirect_addr: redirect_addr.unwrap_or_else(|| DEFAULT_OAUTH_REDIRECT_ADDR.to_owned()),
+            scope: scope.unwrap_or_else(|| DEFAULT_OAUTH_SCOPE.to_owned()),
+        })),
+        (Some(_), None) => Err(anyhow!(
+            "{} is set but {} is not — both are required to enable the OAuth fallback",
+            env_var::OAUTH_CLIENT_ID,
+            env_var::OAUTH_CLIENT_SECRET
+        )),
+        (None, Some(_)) => Err(anyhow!(
+            "{} is set but {} is not — both are required to enable the OAuth fallback",
+            env_var::OAUTH_CLIENT_SECRET,
+            env_var::OAUTH_CLIENT_ID
+        )),
+    }
 }
 
 fn var(name: &str) -> Option<String> {
@@ -155,6 +242,13 @@ impl Config {
             root.join(get(env_var::STORE_DIR).unwrap_or_else(|| "data/store".to_owned()));
         let drive_owner = get(env_var::DRIVE_OWNER);
 
+        let oauth = resolve_oauth_settings(
+            get(env_var::OAUTH_CLIENT_ID).or_else(|| get(env_var::GITHUB_CLIENT_ID)),
+            get(env_var::OAUTH_CLIENT_SECRET).or_else(|| get(env_var::GITHUB_CLIENT_SECRET)),
+            get(env_var::OAUTH_REDIRECT_ADDR),
+            get(env_var::OAUTH_SCOPE),
+        )?;
+
         Ok(Config {
             openapi_document,
             openapi_overlays,
@@ -163,6 +257,7 @@ impl Config {
             public_url,
             store_dir,
             drive_owner,
+            oauth,
         })
     }
 
@@ -179,6 +274,16 @@ impl Config {
             if !overlay.is_file() {
                 return Err(anyhow!("overlay not found: {}", overlay.display()));
             }
+        }
+        if let Some(oauth) = &self.oauth {
+            use std::net::ToSocketAddrs;
+            oauth.redirect_addr.to_socket_addrs().with_context(|| {
+                format!(
+                    "{} is not a valid `host:port`: `{}`",
+                    env_var::OAUTH_REDIRECT_ADDR,
+                    oauth.redirect_addr
+                )
+            })?;
         }
         Ok(())
     }
@@ -273,5 +378,65 @@ mod tests {
     fn credentials_never_render_the_secret() {
         let rendered = format!("{:?}", Credentials::Bearer("ghp_secret".into()));
         assert!(!rendered.contains("ghp_secret"), "{rendered}");
+    }
+
+    #[test]
+    fn oauth_settings_absent_when_neither_var_is_set() {
+        let oauth = resolve_oauth_settings(None, None, None, None).unwrap();
+        assert!(oauth.is_none());
+    }
+
+    #[test]
+    fn oauth_settings_fill_in_defaults() {
+        let oauth = resolve_oauth_settings(
+            Some("client-id".into()),
+            Some("client-secret".into()),
+            None,
+            None,
+        )
+        .unwrap()
+        .expect("both id and secret were given");
+        assert_eq!(oauth.client_id, "client-id");
+        assert_eq!(oauth.client_secret, "client-secret");
+        assert_eq!(oauth.redirect_addr, DEFAULT_OAUTH_REDIRECT_ADDR);
+        assert_eq!(oauth.scope, DEFAULT_OAUTH_SCOPE);
+    }
+
+    #[test]
+    fn oauth_settings_honor_overrides() {
+        let oauth = resolve_oauth_settings(
+            Some("client-id".into()),
+            Some("client-secret".into()),
+            Some("0.0.0.0:9000".into()),
+            Some("repo,read:user".into()),
+        )
+        .unwrap()
+        .unwrap();
+        assert_eq!(oauth.redirect_addr, "0.0.0.0:9000");
+        assert_eq!(oauth.scope, "repo,read:user");
+    }
+
+    #[test]
+    fn oauth_settings_reject_a_client_id_without_a_secret() {
+        assert!(resolve_oauth_settings(Some("client-id".into()), None, None, None).is_err());
+    }
+
+    #[test]
+    fn oauth_settings_reject_a_client_secret_without_an_id() {
+        assert!(resolve_oauth_settings(None, Some("client-secret".into()), None, None).is_err());
+    }
+
+    #[test]
+    fn oauth_settings_never_render_the_secret() {
+        let oauth = resolve_oauth_settings(
+            Some("client-id".into()),
+            Some("shh-secret".into()),
+            None,
+            None,
+        )
+        .unwrap()
+        .unwrap();
+        let rendered = format!("{oauth:?}");
+        assert!(!rendered.contains("shh-secret"), "{rendered}");
     }
 }
