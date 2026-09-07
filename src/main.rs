@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use anyhow::{Context, Result};
 use atomic_lib::Db;
-use reflector_rs::config::Config;
+use reflector_rs::config::{Config, DEFAULT_PLATFORM};
 use reflector_rs::store::AtomicStorage;
 use reflector_rs::{ReqwestFetch, SubjectMapper};
 use syncables::{ClientConfig, SyncClient, SyncError};
@@ -37,22 +37,11 @@ async fn main() -> Result<()> {
     let config = Config::from_env(&root())?;
     config.validate()?;
     info!(
-        document = %config.openapi_document.display(),
-        overlays = config.openapi_overlays.len(),
+        platforms = config.platforms.len(),
         public_url = %config.public_url,
-        constants = ?config.constants,
         oauth_configured = config.oauth.is_some(),
         "reflector-rs starting"
     );
-
-    // Falls back to the interactive GitHub OAuth flow (src/oauth.rs) when
-    // API_TOKEN/GITHUB_TOKEN is missing or no longer accepted and an OAuth
-    // App's client id/secret is configured; otherwise this is a no-op.
-    let credentials =
-        reflector_rs::oauth::resolve_credentials(&config.credentials, config.oauth.as_ref())
-            .await
-            .context("resolving credentials")?;
-    info!(credentials = ?credentials, "credentials resolved");
 
     let store = Db::init_redb_file(
         &config.store_dir,
@@ -70,36 +59,78 @@ async fn main() -> Result<()> {
     )
     .with_drive_owner(config.drive_owner.clone());
 
-    let client = SyncClient::new(
-        ClientConfig {
-            document: config.openapi_document.clone(),
-            overlays: config.openapi_overlays.clone(),
-            credentials,
-            constants: config.constants.clone(),
-            // The ontology derived from the document is minted under the same
-            // origin this store is published on, so a class URL a consumer
-            // reads out of the data actually resolves.
-            ontology_base_url: config.public_url.clone(),
-        },
-        Arc::new(ReqwestFetch::new()),
-    )
-    .map_err(|error| anyhow::anyhow!("{error}"))?;
+    // Each platform gets its own SyncClient (document, overlays, credentials,
+    // constants) but writes into the same store: syncing several platforms
+    // in one run is a matter of listing them, not of any per-platform code.
+    let mut any_platform_failed = false;
+    for platform in &config.platforms {
+        info!(
+            platform = %platform.name,
+            document = %platform.openapi_document.display(),
+            overlays = platform.openapi_overlays.len(),
+            constants = ?platform.constants,
+            "syncing platform"
+        );
 
-    match client.sync(&storage).await {
-        Ok(report) => {
-            info!(?report, "sync finished");
+        // Falls back to the interactive GitHub OAuth flow (src/oauth.rs) when
+        // the github platform's token is missing or no longer accepted and an
+        // OAuth App's client id/secret is configured; otherwise a no-op. Only
+        // the github platform gets this treatment — everything else is
+        // expected to supply an already-obtained token (see CLAUDE.md on
+        // GitHub-specific code being the exception, not the rule).
+        let credentials = if platform.name == DEFAULT_PLATFORM {
+            reflector_rs::oauth::resolve_credentials(&platform.credentials, config.oauth.as_ref())
+                .await
+                .with_context(|| {
+                    format!("resolving credentials for platform `{}`", platform.name)
+                })?
+        } else {
+            platform.credentials.clone()
+        };
+        info!(platform = %platform.name, credentials = ?credentials, "credentials resolved");
 
-            Ok(())
+        let client = match SyncClient::new(
+            ClientConfig {
+                document: platform.openapi_document.clone(),
+                overlays: platform.openapi_overlays.clone(),
+                credentials,
+                constants: platform.constants.clone(),
+                // The ontology derived from each document is minted under the
+                // same origin this store is published on, so a class URL a
+                // consumer reads out of the data actually resolves.
+                ontology_base_url: config.public_url.clone(),
+            },
+            Arc::new(ReqwestFetch::new()),
+        ) {
+            Ok(client) => client,
+            Err(error) => {
+                warn!(platform = %platform.name, %error, "failed to build sync client");
+                any_platform_failed = true;
+                continue;
+            }
+        };
+
+        match client.sync(&storage).await {
+            Ok(report) => info!(platform = %platform.name, ?report, "sync finished"),
+            Err(SyncError::NotImplemented(what)) => {
+                warn!(
+                    platform = %platform.name,
+                    "{what}\n\
+                     Local-first writes (create/update/remove) are the only \
+                     part of the sync engine not implemented yet — see \
+                     https://github.com/localthought/syncables-rs/issues/9."
+                );
+                any_platform_failed = true;
+            }
+            Err(error) => {
+                warn!(platform = %platform.name, %error, "sync failed");
+                any_platform_failed = true;
+            }
         }
-        Err(SyncError::NotImplemented(what)) => {
-            warn!(
-                "{what}\n\
-                 Local-first writes (create/update/remove) are the only \
-                 part of the sync engine not implemented yet — see \
-                 https://github.com/localthought/syncables-rs/issues/9."
-            );
-            std::process::exit(1);
-        }
-        Err(error) => Err(anyhow::anyhow!("{error}")).context("sync failed"),
     }
+
+    if any_platform_failed {
+        std::process::exit(1);
+    }
+    Ok(())
 }

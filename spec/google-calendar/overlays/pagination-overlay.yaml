@@ -1,0 +1,42 @@
+overlay: 1.0.0
+info:
+  title: Google Calendar API Pagination Scheme
+  version: 1.0.0
+# Google Calendar paginates list endpoints with an opaque `pageToken`/
+# `nextPageToken` pair (plus a `nextSyncToken` for incremental sync, which
+# this read-only, full-listing platform doesn't use — see README's Google
+# Calendar section). syncables-rs's pagination extension only recognizes
+# pageNumber/pageToken/nextLink scheme types, so this is declared as
+# `pageToken` rather than Google's own "incremental sync" framing, applied
+# explicitly via x-pagination the same way the GitHub pagination overlay
+# applies its nextLink scheme.
+actions:
+  - target: $.components
+    update:
+      paginationSchemes:
+        pageToken:
+          type: pageToken
+          request:
+            queryParameters:
+              maxResults:
+                role: pageSize
+                description: Results per page.
+              pageToken:
+                role: pageToken
+                description: Token specifying which result page to return.
+          response:
+            bodyFields:
+              nextPageToken:
+                role: nextPageToken
+                description: >
+                  Token for the next page of results; omitted on the last
+                  page.
+
+  - target: $.paths['/users/me/calendarList'].get
+    update:
+      x-pagination:
+        - scheme: pageToken
+  - target: $.paths['/calendars/{calendarId}/events'].get
+    update:
+      x-pagination:
+        - scheme: pageToken

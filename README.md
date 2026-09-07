@@ -18,7 +18,8 @@ Nothing in `src/` is GitHub-specific. The default configuration happens to
 point at a vendored GitHub Issues document and syncs the issues and comments
 of [`localthought/test-repo-1`](https://github.com/localthought/test-repo-1);
 pointing it at a different API is a change of environment variables and
-overlay files.
+overlay files. A single run can also reflect **several platforms** at once —
+see [Reflecting more than one platform](#reflecting-more-than-one-platform).
 
 It is the Rust sibling of [`localthought/reflector`](https://github.com/localthought/reflector),
 which does the same job in TypeScript against the npm `syncables` package.
@@ -39,22 +40,102 @@ async `Storelike` and typed `Subject` this crate is written against.
 ## Configuration
 
 Everything that varies between deployments is an environment variable. Only
-`PUBLIC_URL` has no default.
+`PUBLIC_URL` has no default. The variables below reflect the single default
+platform, `github`; see [Reflecting more than one
+platform](#reflecting-more-than-one-platform) for how they change when
+`PLATFORMS` is set.
 
 | Variable | Default | What it is |
 | --- | --- | --- |
 | `PUBLIC_URL` | *(required)* | The origin this store's data is public under, e.g. `https://my-ontologies.com`. |
-| `OPENAPI_DOCUMENT` | `spec/github-issues.openapi.yaml` | The OpenAPI document the sync flow is derived from. |
-| `OPENAPI_OVERLAYS` | the three files in `spec/overlays/github/` | Comma-separated OpenAPI Overlay files, applied **in order**. |
-| `API_TOKEN` (or `GITHUB_TOKEN`) | *(none — anonymous)* | Bearer token for the API. |
-| `API_CONSTANTS` | `owner=localthought,repo=test-repo-1` | `key=value` pairs bound into the document's path/query parameters. |
+| `PLATFORMS` | *(unset — just `github`)* | Comma-separated platforms to sync in one run, e.g. `github,google-calendar`. See below. |
+| `OPENAPI_DOCUMENT` | `spec/github/github-issues.openapi.yaml` | The OpenAPI document the sync flow is derived from. Read only when `PLATFORMS` is unset. |
+| `OPENAPI_OVERLAYS` | the three files in `spec/github/overlays/` | Comma-separated OpenAPI Overlay files, applied **in order**. Read only when `PLATFORMS` is unset. |
+| `API_TOKEN` (or `GITHUB_TOKEN`) | *(none — anonymous)* | Bearer token for the API. Read only when `PLATFORMS` is unset. |
+| `API_CONSTANTS` | `owner=localthought,repo=test-repo-1` | `key=value` pairs bound into the document's path/query parameters. Read only when `PLATFORMS` is unset. |
 | `STORE_DIR` | `data/store` | Directory containing the persistent `atomic.redb` database (not the file itself). |
 | `DRIVE_OWNER` | *(none)* | Agent subject to grant read/write access when a repository drive is first created. Existing drive permissions are retained. |
 | `REFLECTOR_ROOT` | the working directory | What the paths above are resolved against. |
-| `OAUTH_CLIENT_ID` (or `GITHUB_CLIENT_ID`) | *(none)* | GitHub OAuth App client id, used to authenticate when `API_TOKEN` is missing or rejected. |
+| `OAUTH_CLIENT_ID` (or `GITHUB_CLIENT_ID`) | *(none)* | GitHub OAuth App client id, used to authenticate the `github` platform when its token is missing or rejected. |
 | `OAUTH_CLIENT_SECRET` (or `GITHUB_CLIENT_SECRET`) | *(none)* | GitHub OAuth App client secret, paired with `OAUTH_CLIENT_ID`. |
 | `OAUTH_REDIRECT_ADDR` | `127.0.0.1:8901` | `host:port` the local OAuth callback web server binds to. |
 | `OAUTH_SCOPE` | `repo` | OAuth scope requested from GitHub during the authorization-code flow. |
+
+## Reflecting more than one platform
+
+A single run can reflect several platforms — each with its own OpenAPI
+document, overlays, credential and constants — into the same store. Set
+`PLATFORMS` to a comma-separated list, e.g.:
+
+```sh
+PLATFORMS=github,google-calendar
+GITHUB_API_TOKEN=ghp_…
+GOOGLE_CALENDAR_API_TOKEN=ya29…
+```
+
+Setting `PLATFORMS` switches **every** named platform (including `github`,
+if listed) from the unprefixed variables in the table above to
+`<PLATFORM>_`-prefixed ones — the platform's name, upper-cased with `-`
+replaced by `_`, joined to the same suffixes: `<PLATFORM>_OPENAPI_DOCUMENT`,
+`<PLATFORM>_OPENAPI_OVERLAYS`, `<PLATFORM>_API_TOKEN`,
+`<PLATFORM>_API_CONSTANTS`. There is no multi-platform `GITHUB_TOKEN`-style
+alias; a `github` platform in this mode always reads `GITHUB_API_TOKEN`.
+
+Two platforms have built-in defaults, so only their credential (and, for
+Google Calendar, optionally which calendar) needs configuring:
+
+| Platform | Document/overlays default to | `API_CONSTANTS` default |
+| --- | --- | --- |
+| `github` | `spec/github/` | `owner=localthought,repo=test-repo-1` |
+| `google-calendar` | `spec/google-calendar/` | `calendarId=primary` |
+
+Any other name has no built-in defaults — its `<PLATFORM>_OPENAPI_DOCUMENT`,
+overlays and constants must all be configured explicitly, pointing at a
+document and overlays you supply (conventionally under
+`spec/<platform>/`, mirroring the two built-in platforms). This is how a
+deployment adds an API of its own without a code change: write an OpenAPI
+document plus the three overlays (auth, pagination, crud-causality) that
+complete it, drop them under `spec/<platform>/`, and set
+`<PLATFORM>_OPENAPI_DOCUMENT`/`<PLATFORM>_OPENAPI_OVERLAYS`.
+
+Every platform shares `PUBLIC_URL`, `STORE_DIR` and `DRIVE_OWNER` — they
+describe the one store this run writes into, not any one platform — and each
+document mints its own ontology terms (`github-issues/…`,
+`google-calendar/…`, …) under that same `PUBLIC_URL`, so multiple platforms
+never collide in one store. A platform that fails (a bad credential, a
+network error) is logged and skipped; the others still sync, and the process
+exits non-zero only if at least one platform failed.
+
+### Google Calendar
+
+`google-calendar` reflects a user's calendars (via their calendar list) and
+the events on them — read-only, matching the "still keep them read-only"
+scope of [issue #15](https://github.com/localthought/reflector-rs/issues/15).
+reflector-rs has no generic interactive-OAuth flow (`src/oauth.rs` is
+GitHub-specific — see CLAUDE.md), so `GOOGLE_CALENDAR_API_TOKEN` must already
+be a valid OAuth 2.0 access token for a calendar-read scope (e.g.
+`https://www.googleapis.com/auth/calendar.readonly`), obtained and refreshed
+however your deployment prefers (the [OAuth 2.0
+Playground](https://developers.google.com/oauthplayground/) for a one-off
+sync, or your own token-refresh job for a recurring one). `calendarId=primary`
+(the default) syncs the authenticated account's own calendar; set
+`GOOGLE_CALENDAR_API_CONSTANTS=calendarId=<id>` (an id from the calendar
+list, or another account's calendar shared with this one) to sync a
+different one.
+
+### Adding more platforms
+
+[issue #15](https://github.com/localthought/reflector-rs/issues/15) asks for
+many more read-only platforms, as long as each one's document and overlays
+exist and its credential is a bearer token — most of them should follow the
+same recipe as `google-calendar` above. One real limitation surfaced while
+researching that issue: Clockify's API authenticates with an API key sent as
+a bespoke `x-api-key` header (an OpenAPI `apiKey`-type security scheme), not
+`Authorization: Bearer`, and `syncables::Credentials` only models the latter
+(see [`localthought/syncables-rs`](https://github.com/localthought/syncables-rs)'s
+`Credentials` enum). Adding Clockify — or anything else authenticated the
+same way — needs that upstream crate to grow an API-key credential kind
+first; it is not something an overlay alone can express.
 
 ### Authenticating with GitHub
 
@@ -197,11 +278,16 @@ issues public by default. To change permissions on an existing drive, use
 AtomicServer's sharing controls. Open the drive directly at
 `<PUBLIC_URL>/reflector-drives/localthought%2Ftest-repo-1`.
 
-## The vendored document
+## The vendored documents
 
-`spec/github-issues.openapi.yaml` is a narrowed subset of the GitHub REST API
-covering issues and issue comments, with three overlays in
-`spec/overlays/github/`:
+Each platform's document and overlays live under `spec/<platform>/`, one
+subfolder per platform — see [Reflecting more than one
+platform](#reflecting-more-than-one-platform) for how a deployment points at
+its own instead.
+
+`spec/github/github-issues.openapi.yaml` is a narrowed subset of the GitHub
+REST API covering issues and issue comments, with three overlays in
+`spec/github/overlays/`:
 
 - **auth** — the `http`/`bearer` security scheme.
 - **pagination** — GitHub's RFC 8288 `Link` header, declared per list operation
@@ -214,6 +300,26 @@ covering issues and issue comments, with three overlays in
 
 All four files are copied from `localthought/reflector`, which uses them
 against the TypeScript engine.
+
+`spec/google-calendar/google-calendar.openapi.yaml` is a narrowed,
+read-only subset of Google's Calendar API (the full document is mirrored on
+[apis.guru](https://apis.guru/), and `localthought/reflector` vendors it
+unnarrowed for the TypeScript engine) covering calendar-list entries and
+events, with three overlays in `spec/google-calendar/overlays/`:
+
+- **auth** — the `http`/`bearer` security scheme, sent with a pre-obtained
+  access token (see [Google Calendar](#google-calendar) above) rather than an
+  interactive flow.
+- **pagination** — a `pageToken`/`nextPageToken` scheme. Google's own
+  documentation frames this as "incremental sync" with a `syncToken`
+  fallback, but `syncables-rs`'s pagination extension only recognizes
+  `pageNumber`/`pageToken`/`nextLink` scheme types, so this platform does a
+  full listing on every run instead of an incremental one.
+- **crud-causality** — `list`/`read` only, matching this platform's read-only
+  scope. One Google-specific wrinkle: there is no "list all calendars"
+  operation, so an event's `calendarId` is supplied by enumerating
+  `calendarListEntry` (via its own identity binding) rather than by a
+  dedicated calendars collection.
 
 ## WASM compatibility
 
