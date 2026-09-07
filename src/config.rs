@@ -371,6 +371,23 @@ fn resolve_platform(
     })
 }
 
+impl PlatformConfig {
+    /// Identifies the complete dataset this platform imports — e.g.
+    /// `localthought/test-repo-1` for `github`, or `primary` for
+    /// `google-calendar` — derived from [`PlatformConfig::constants`]'
+    /// values in key order. Every record this platform's sync writes, root
+    /// or nested, is grouped under the *one* Drive/Document/Table this
+    /// names — see [`crate::store::AtomicStorage::with_dataset`] — rather
+    /// than each record's own (possibly deeper, per-parent) namespace.
+    pub fn dataset_namespace(&self) -> String {
+        self.constants
+            .values()
+            .cloned()
+            .collect::<Vec<_>>()
+            .join("/")
+    }
+}
+
 impl Config {
     /// Reads the configuration from the process environment, resolving paths
     /// relative to `root` (the crate directory, so the vendored `spec/` works
@@ -424,21 +441,6 @@ impl Config {
             drive_owner,
             oauth,
         })
-    }
-
-    /// Identifies the complete dataset this run imports — e.g.
-    /// `localthought/test-repo-1` — derived from [`Config::constants`]'
-    /// values in key order (`owner` then `repo`, for the default document).
-    /// Every record the sync writes, root or nested, is grouped under the
-    /// *one* Drive/Document/Table this names — see
-    /// [`crate::store::AtomicStorage::with_dataset`] — rather than each
-    /// record's own (possibly deeper, per-parent) namespace.
-    pub fn dataset_namespace(&self) -> String {
-        self.constants
-            .values()
-            .cloned()
-            .collect::<Vec<_>>()
-            .join("/")
     }
 
     /// Fails early on anything the sync would only discover mid-flight: a
@@ -558,7 +560,27 @@ mod tests {
             _ => None,
         })
         .unwrap();
-        assert_eq!(config.dataset_namespace(), "localthought/test-repo-1");
+        assert_eq!(
+            config.platforms[0].dataset_namespace(),
+            "localthought/test-repo-1"
+        );
+    }
+
+    #[test]
+    fn each_platform_gets_its_own_dataset_namespace() {
+        let config = Config::from_lookup(
+            Path::new("/reflector"),
+            lookup(&[
+                (env_var::PUBLIC_URL, "http://localhost:9883"),
+                (env_var::PLATFORMS, "github, google-calendar"),
+            ]),
+        )
+        .unwrap();
+        assert_eq!(
+            config.platforms[0].dataset_namespace(),
+            "localthought/test-repo-1"
+        );
+        assert_eq!(config.platforms[1].dataset_namespace(), "primary");
     }
 
     #[test]

@@ -53,18 +53,21 @@ async fn main() -> Result<()> {
         "opening {}/atomic.redb; stop AtomicServer before sharing its store (redb requires exclusive access)",
         config.store_dir.display()
     ))?;
-    let storage = AtomicStorage::new(
-        Arc::new(store),
-        SubjectMapper::new(config.public_url.clone()),
-    )
-    .with_drive_owner(config.drive_owner.clone())
-    .with_dataset(config.dataset_namespace());
+    let store = Arc::new(store);
+    let mapper = SubjectMapper::new(config.public_url.clone());
 
     // Each platform gets its own SyncClient (document, overlays, credentials,
-    // constants) but writes into the same store: syncing several platforms
-    // in one run is a matter of listing them, not of any per-platform code.
+    // constants) *and* its own AtomicStorage (own dataset, own ontology-term
+    // index) sharing the same underlying Db — syncing several platforms in
+    // one run is a matter of listing them, not of any per-platform code, and
+    // keeps each platform's records grouped under its own Drive/Document/
+    // Table rather than colliding into one.
     let mut any_platform_failed = false;
     for platform in &config.platforms {
+        let storage = AtomicStorage::new(Arc::clone(&store), mapper.clone())
+            .with_drive_owner(config.drive_owner.clone())
+            .with_dataset(platform.dataset_namespace());
+
         info!(
             platform = %platform.name,
             document = %platform.openapi_document.display(),
