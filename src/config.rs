@@ -390,8 +390,8 @@ impl PlatformConfig {
 
 impl Config {
     /// Reads the configuration from the process environment, resolving paths
-    /// relative to `root` (the crate directory, so the vendored `spec/` works
-    /// out of the box).
+    /// relative to `root` (the crate directory, so `spec/` — see
+    /// `scripts/fetch-oad.sh` — resolves out of the box).
     pub fn from_env(root: &Path) -> Result<Self> {
         Self::from_lookup(root, var)
     }

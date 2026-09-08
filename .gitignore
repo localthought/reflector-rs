@@ -1,3 +1,6 @@
 /target
 /data
 .env
+# Fetched by scripts/fetch-oad.sh from openapi-directory/overlays — see
+# README's "The OAD documents" section. Not vendored here any more.
+/spec
