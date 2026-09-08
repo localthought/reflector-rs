@@ -31,7 +31,7 @@ urlencoding = "2"
 # `wasm` supplies the JS-backed randomness that needs — see the "WASM
 # compatibility" section in README.md.
 [target.'cfg(not(target_arch = "wasm32"))'.dependencies]
-atomic_lib = { git = "https://github.com/ontola/atomic-server", rev = "fc045025536c1694b0c0d63024cb5ebe2db3d5c0", features = ["db-redb"] }
+atomic_lib = { git = "https://github.com/ontola/atomic-server", rev = "95c9e8f64c6e984f619b942d50eb9aec4701039c", features = ["db-redb"] }
 # The OAuth fallback's local callback server (src/oauth.rs) — a web interface
 # for the authorization-code dance when no valid API_TOKEN is configured.
 # Binding a real TCP listener has no wasm32 equivalent, so this whole module
@@ -41,7 +41,7 @@ rand = "0.9"
 tokio = { version = "1", features = ["macros", "rt-multi-thread", "net", "sync"] }
 
 [target.'cfg(target_arch = "wasm32")'.dependencies]
-atomic_lib = { git = "https://github.com/ontola/atomic-server", rev = "fc045025536c1694b0c0d63024cb5ebe2db3d5c0", features = ["db-redb", "wasm"] }
+atomic_lib = { git = "https://github.com/ontola/atomic-server", rev = "95c9e8f64c6e984f619b942d50eb9aec4701039c", features = ["db-redb", "wasm"] }
 # `ulid` (via atomic_lib) pulls in `rand` 0.9 -> `getrandom` 0.3, which needs
 # its `wasm_js` feature *and* the `getrandom_backend="wasm_js"` cfg
 # (.cargo/config.toml) to build for wasm32 — the feature alone isn't enough.

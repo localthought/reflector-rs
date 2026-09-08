@@ -226,7 +226,7 @@ impl<S: Storelike> AtomicStorage<S> {
         ));
         let stale: Vec<Subject> = self
             .store
-            .all_resources(false)
+            .resources_with_prefix(&prefix)
             .filter_map(|resource| {
                 let subject = resource.get_subject().to_string();
                 let is_stale_drive = subject.starts_with(&prefix)
@@ -730,7 +730,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
         let stale_prefix = format!("{subject}/");
         let stale_subjects: Vec<Subject> = self
             .store
-            .all_resources(false)
+            .resources_with_prefix(&stale_prefix)
             .filter_map(|resource| {
                 let candidate = resource.get_subject().to_string();
                 candidate
@@ -794,7 +794,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
             .map_err(|error| StorageError::new(error.to_string()))?;
         let resources: HashMap<String, Resource> = self
             .store
-            .all_resources(false)
+            .resources_with_prefix(&format!("{subject}/"))
             .map(|resource| (resource.get_subject().to_string(), resource))
             .collect();
         Ok(self.record_from_resource(&stored, &self.index(), &resources))
@@ -805,7 +805,7 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
         let index = self.index();
         let resources: HashMap<String, Resource> = self
             .store
-            .all_resources(false)
+            .resources_with_prefix(&prefix)
             .map(|stored| (stored.get_subject().to_string(), stored))
             .collect();
         let mut records: Vec<Record> = resources
@@ -828,12 +828,16 @@ impl<S: Storelike> Storage for AtomicStorage<S> {
         }
         let prefix = format!("{subject}/");
         let mut subjects = vec![subject];
-        subjects.extend(self.store.all_resources(false).filter_map(|resource| {
-            let candidate = resource.get_subject().to_string();
-            candidate
-                .starts_with(&prefix)
-                .then(|| Subject::from(candidate.as_str()))
-        }));
+        subjects.extend(
+            self.store
+                .resources_with_prefix(&prefix)
+                .filter_map(|resource| {
+                    let candidate = resource.get_subject().to_string();
+                    candidate
+                        .starts_with(&prefix)
+                        .then(|| Subject::from(candidate.as_str()))
+                }),
+        );
         for subject in subjects {
             self.store
                 .remove_resource(&subject)
