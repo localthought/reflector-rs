@@ -116,8 +116,8 @@ checksum = "1505bd5d3d116872e7271a6d4e16d81d0c8570876c8de68093a09ac269d8aac0"
 
 [[package]]
 name = "atomic_lib"
-version = "0.41.0-beta.4"
-source = "git+https://github.com/ontola/atomic-server?rev=fc045025536c1694b0c0d63024cb5ebe2db3d5c0#fc045025536c1694b0c0d63024cb5ebe2db3d5c0"
+version = "0.41.0-beta.5"
+source = "git+https://github.com/ontola/atomic-server?rev=95c9e8f64c6e984f619b942d50eb9aec4701039c#95c9e8f64c6e984f619b942d50eb9aec4701039c"
 dependencies = [
  "argon2",
  "async-trait",
