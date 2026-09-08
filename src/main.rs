@@ -12,9 +12,9 @@ use reflector_rs::{ReqwestFetch, SubjectMapper};
 use syncables::{ClientConfig, SyncClient, SyncError};
 use tracing::{info, warn};
 
-/// Paths in the configuration are resolved against this directory, so the
-/// vendored `spec/` works from a `cargo run` with no configuration beyond the
-/// required `PUBLIC_URL`.
+/// Paths in the configuration are resolved against this directory, so
+/// `spec/` (populated by `scripts/fetch-oad.sh`, see README) resolves from a
+/// `cargo run` with no configuration beyond the required `PUBLIC_URL`.
 fn root() -> PathBuf {
     std::env::var("REFLECTOR_ROOT")
         .map(PathBuf::from)
