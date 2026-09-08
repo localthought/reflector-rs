@@ -28,9 +28,16 @@ which does the same job in TypeScript against the npm `syncables` package.
 
 ```sh
 cp .env.example .env      # then set PUBLIC_URL and API_TOKEN
+./scripts/fetch-oad.sh    # fetches the default github/google-calendar OAD documents into spec/
 cargo test
 PUBLIC_URL=https://my-ontologies.com API_TOKEN=ghp_… cargo run
 ```
+
+`cargo test` doesn't need `scripts/fetch-oad.sh` — nothing in the test suite
+reads the vendored documents from disk. `cargo run` (and `cargo run --
+import-oad`-style CLI hosts, like `ontola/atomic-server`'s) does, for the
+built-in `github`/`google-calendar` platforms' zero-config defaults — see
+[The OAD documents](#the-oad-documents).
 
 Requires a Rust toolchain (2021 edition, 1.89+). The first build fetches
 `atomic_lib` from the [ontola/atomic-server](https://github.com/ontola/atomic-server)
@@ -318,16 +325,29 @@ AtomicServer's sharing controls. Open the drive directly at
 `<PUBLIC_URL>/reflector-drives/localthought%2Ftest-repo-1/document` for the
 issues table.
 
-## The vendored documents
+## The OAD documents
 
 Each platform's document and overlays live under `spec/<platform>/`, one
 subfolder per platform — see [Reflecting more than one
 platform](#reflecting-more-than-one-platform) for how a deployment points at
 its own instead.
 
-`spec/github/github-issues.openapi.yaml` is a narrowed subset of the GitHub
-REST API covering issues and issue comments, with three overlays in
-`spec/github/overlays/`:
+The `github`/`google-calendar` documents and their overlays are **not
+vendored in this repo**. They live in their own dedicated homes —
+[`localthought/openapi-directory`](https://github.com/localthought/openapi-directory)
+(`APIs/github.com/github-issues/1.1.4` and
+`APIs/googleapis.com/google-calendar/v3`) and
+[`localthought/overlays`](https://github.com/localthought/overlays) (the same
+paths) — so other hosts and future platforms can share them without going
+through this crate. `scripts/fetch-oad.sh` fetches them, pinned by commit, to
+the same `spec/<platform>/` paths they used to be committed at (`spec/` is
+gitignored); see [Running it](#running-it). A deployment (`ontola/atomic-server`
+included, via its `REFLECTOR_ROOT`) needs to run that script, or otherwise
+populate `spec/` itself, before the zero-config defaults resolve to a real
+file — `Config::validate` fails fast with a clear error if they're missing.
+
+`github-issues.openapi.yaml` is a narrowed subset of the GitHub REST API
+covering issues and issue comments, with three overlays:
 
 - **auth** — the `http`/`bearer` security scheme.
 - **pagination** — GitHub's RFC 8288 `Link` header, declared per list operation
@@ -338,14 +358,13 @@ REST API covering issues and issue comments, with three overlays in
   `id` in the same payload, and a comment is listed under its parent issue but
   addressed at a non-nested URL.
 
-All four files are copied from `localthought/reflector`, which uses them
-against the TypeScript engine.
+All four files were originally copied from `localthought/reflector`, which
+uses its own copies against the TypeScript engine.
 
-`spec/google-calendar/google-calendar.openapi.yaml` is a narrowed,
-read-only subset of Google's Calendar API (the full document is mirrored on
-[apis.guru](https://apis.guru/), and `localthought/reflector` vendors it
-unnarrowed for the TypeScript engine) covering calendar-list entries and
-events, with three overlays in `spec/google-calendar/overlays/`:
+`google-calendar.openapi.yaml` is a narrowed, read-only subset of Google's
+Calendar API (the full document is mirrored on [apis.guru](https://apis.guru/),
+and `localthought/reflector` vendors it unnarrowed for the TypeScript engine)
+covering calendar-list entries and events, with three overlays:
 
 - **auth** — the `http`/`bearer` security scheme, sent with a pre-obtained
   access token (see [Google Calendar](#google-calendar) above) rather than an

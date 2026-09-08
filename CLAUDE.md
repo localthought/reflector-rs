@@ -14,8 +14,11 @@ this crate supplies configuration, an HTTP `Fetch` implementation, and the
 full picture, configuration reference, and how the pieces fit together —
 read it before making non-trivial changes.
 
-The default configuration points at a vendored GitHub Issues document and
-syncs one repository (`localthought/test-repo-1`), but nothing in `src/` is
+The default configuration points at a GitHub Issues document — fetched by
+`scripts/fetch-oad.sh` from `localthought/openapi-directory`/`localthought/overlays`
+into `spec/` (gitignored, not vendored in this repo — see README's "The OAD
+documents" section) — and syncs one repository (`localthought/test-repo-1`),
+but nothing in `src/` is
 supposed to be GitHub-specific *by design* — in practice `src/oauth.rs` and
 part of `src/config.rs` do call GitHub's API directly, which is a deliberate,
 narrow exception (see below), not a precedent for adding more.
@@ -27,6 +30,7 @@ cargo build              # first build fetches atomic_lib and syncables from git
 cargo test                # unit + integration tests; no network required except see below
 cargo fmt -- --check      # this repo is rustfmt-clean; run `cargo fmt` before committing
 cargo clippy --all-targets -- -D warnings   # must be warning-free
+./scripts/fetch-oad.sh    # needed once before `cargo run`'s zero-config default — not by cargo test
 cargo run                 # needs PUBLIC_URL at minimum; see .env.example
 cargo build --target wasm32-unknown-unknown --lib   # the library only — see below
 cargo clippy --target wasm32-unknown-unknown --lib -- -D warnings
